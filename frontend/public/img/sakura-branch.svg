@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 220">
+  <g>
+    <path d="M8 210 Q 60 164 122 122 Q 164 94 226 62" stroke="#40293a" stroke-width="6" fill="none" stroke-linecap="round"/>
+    <path d="M122 122 Q 146 104 158 72" stroke="#40293a" stroke-width="4.5" fill="none" stroke-linecap="round"/>
+    <path d="M158 72 q 8 -16 2 -30" stroke="#40293a" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+    <path d="M158 72 q 22 -4 34 8" stroke="#40293a" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+    <path d="M180 46 q -4 -20 6 -34" stroke="#40293a" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <!-- 花1 -->
+    <g transform="translate(160,58)">
+      <circle cx="0" cy="-8" r="9" fill="#ffb7c5"/><circle cx="9" cy="-2" r="9" fill="#ffc9d6"/><circle cx="7" cy="9" r="9" fill="#ffb7c5"/><circle cx="-4" cy="10" r="9" fill="#ffc9d6"/><circle cx="-9" cy="-1" r="9" fill="#ffd7e0"/>
+      <circle cx="2" cy="2" r="3.4" fill="#e8543a"/>
+    </g>
+    <!-- 花2 -->
+    <g transform="translate(208,60) scale(.8)">
+      <circle cx="0" cy="-8" r="9" fill="#ffc0ce"/><circle cx="9" cy="-2" r="9" fill="#ffd2dc"/><circle cx="7" cy="9" r="9" fill="#ffc0ce"/><circle cx="-4" cy="10" r="9" fill="#ffd2dc"/><circle cx="-9" cy="-1" r="9" fill="#ffd9e2"/>
+      <circle cx="2" cy="2" r="3.4" fill="#e8543a"/>
+    </g>
+    <!-- 花3 半开 -->
+    <g transform="translate(120,112) scale(.66)">
+      <circle cx="0" cy="-8" r="9" fill="#ffc9d6"/><circle cx="9" cy="-2" r="9" fill="#ffb7c5"/><circle cx="7" cy="9" r="9" fill="#ffc9d6"/><circle cx="-4" cy="10" r="9" fill="#ffb7c5"/><circle cx="-9" cy="-1" r="9" fill="#ffc9d6"/>
+      <circle cx="2" cy="2" r="3.2" fill="#e8543a"/>
+    </g>
+    <!-- 花苞 -->
+    <g transform="translate(90,140)">
+      <circle cx="0" cy="0" r="6" fill="#ffb7c5"/><circle cx="-6" cy="2" r="5" fill="#ffc9d6"/><circle cx="5" cy="3" r="5" fill="#ffc9d6"/>
+    </g>
+    <!-- 飘落花瓣 -->
+    <g fill="#ffb7c5" opacity=".85">
+      <path d="M196 96 q 6 -8 14 -4 q -2 8 -10 8 Z"/>
+      <path d="M232 92 q 5 -7 12 -4 q -2 7 -9 8 Z"/>
+      <path d="M176 78 q 5 -7 11 -4 q -1 7 -8 8 Z"/>
+    </g>
+  </g>
+</svg>

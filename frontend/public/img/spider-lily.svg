@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 190 230">
+  <g>
+    <!-- 茎 -->
+    <path d="M95 230 Q 90 170 95 96" stroke="#2f5a44" stroke-width="6" fill="none"/>
+    <path d="M95 150 Q 70 138 52 128" stroke="#2f5a44" stroke-width="4" fill="none"/>
+    <!-- 花瓣（六片细长翻卷） -->
+    <g fill="#d92b45">
+      <path d="M95 96 q -18 -6 -36 -22 q -2 14 8 30 q 12 10 28 4 Z"/>
+      <path d="M95 96 q -24 4 -40 16 q 6 14 24 12 q 14 -4 16 -28 Z"/>
+      <path d="M95 96 q -14 -18 -12 -38 q 12 4 18 20 q 2 12 -6 18 Z"/>
+      <path d="M95 96 q 18 -6 36 -22 q 2 14 -8 30 q -12 10 -28 4 Z"/>
+      <path d="M95 96 q 24 4 40 16 q -6 14 -24 12 q -14 -4 -16 -28 Z"/>
+      <path d="M95 96 q 14 -18 12 -38 q -12 4 -18 20 q -2 12 6 18 Z"/>
+    </g>
+    <!-- 长花蕊 -->
+    <g stroke="#f6c86a" stroke-width="1.6" stroke-linecap="round">
+      <path d="M95 96 q -10 -12 -20 -20"/><circle cx="75" cy="76" r="2.2" fill="#f6c86a"/>
+      <path d="M95 96 q 0 -16 0 -28"/><circle cx="95" cy="68" r="2.2" fill="#f6c86a"/>
+      <path d="M95 96 q 10 -12 20 -20"/><circle cx="115" cy="76" r="2.2" fill="#f6c86a"/>
+      <path d="M95 96 q -18 -4 -30 -6"/><circle cx="65" cy="90" r="2" fill="#f6c86a"/>
+      <path d="M95 96 q 18 -4 30 -6"/><circle cx="125" cy="90" r="2" fill="#f6c86a"/>
+    </g>
+    <!-- 侧叶 -->
+    <g fill="#2f5a44">
+      <path d="M62 146 q -16 -10 -26 -4 q 2 14 18 16 q 10 0 8 -12 Z"/>
+    </g>
+  </g>
+</svg>

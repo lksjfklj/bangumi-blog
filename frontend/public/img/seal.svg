@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
+  <g fill="none" stroke="#ff8a5c" opacity=".85">
+    <circle cx="120" cy="120" r="116" stroke-width="2"/>
+    <circle cx="120" cy="120" r="98" stroke-width="1.6" stroke-dasharray="2 6" stroke-linecap="round"/>
+    <circle cx="120" cy="120" r="80" stroke-width="2.4"/>
+  </g>
+  <g stroke="#ff8a5c" stroke-width="3" opacity=".8" stroke-linecap="round">
+    <path d="M120 0 v14"/>
+    <path d="M120 226 v14"/>
+    <path d="M0 120 h14"/>
+    <path d="M226 120 h14"/>
+    <path d="M31 31 l10 10"/>
+    <path d="M199 199 l10 10"/>
+    <path d="M31 209 l10 -10"/>
+    <path d="M199 41 l10 -10"/>
+  </g>
+  <g fill="#ff8a5c" opacity=".55">
+    <circle cx="120" cy="22" r="3"/><circle cx="120" cy="218" r="3"/>
+    <circle cx="22" cy="120" r="3"/><circle cx="218" cy="120" r="3"/>
+    <circle cx="51" cy="51" r="3"/><circle cx="189" cy="189" r="3"/>
+    <circle cx="51" cy="189" r="3"/><circle cx="189" cy="51" r="3"/>
+  </g>
+  <g fill="none" stroke="#ff8a5c" stroke-width="2.6" opacity=".7">
+    <path d="M120 46 A 34 34 0 0 1 148 70 L 138 74 A 24 24 0 0 0 120 56 Z"/>
+    <path d="M120 46 A 34 34 0 0 0 92 70 L 102 74 A 24 24 0 0 1 120 56 Z"/>
+    <path d="M120 194 A 34 34 0 0 1 92 170 L 102 166 A 24 24 0 0 0 120 184 Z"/>
+    <path d="M120 194 A 34 34 0 0 0 148 170 L 138 166 A 24 24 0 0 1 120 184 Z"/>
+  </g>
+  <path d="M120 74 L147 82.8 L76.3 134.2 L163.8 134.2 L93 82.8 Z"
+        fill="#ff8a5c" opacity=".85"/>
+  <circle cx="120" cy="120" r="14" fill="none" stroke="#ff8a5c" stroke-width="2.6"/>
+</svg>

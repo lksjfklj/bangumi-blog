@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 260">
+  <g fill="#070c1a">
+    <!-- 大屋顶 -->
+    <path d="M28 98 Q 160 58 292 98 L 284 120 Q 160 84 36 120 Z"/>
+    <!-- 山花屋顶 -->
+    <path d="M118 98 Q 160 76 202 98 L 192 116 Q 160 98 128 116 Z"/>
+    <!-- 檐下 -->
+    <rect x="50" y="120" width="220" height="11" rx="2"/>
+    <!-- 屋脊与千木 -->
+    <rect x="138" y="56" width="44" height="16" rx="4"/>
+    <path d="M160 56 L 170 42 L 152 42 Z"/>
+    <rect x="96" y="66" width="8" height="26" rx="2"/>
+    <rect x="216" y="66" width="8" height="26" rx="2"/>
+    <!-- 立柱 -->
+    <rect x="68" y="131" width="15" height="92" rx="3"/>
+    <rect x="237" y="131" width="15" height="92" rx="3"/>
+    <rect x="151" y="131" width="12" height="92" rx="3"/>
+    <!-- 基坛 -->
+    <rect x="50" y="223" width="220" height="15" rx="2"/>
+    <rect x="62" y="238" width="196" height="10" rx="2"/>
+    <!-- 注连绳 -->
+    <path d="M92 130 q 32 -14 64 0 q -8 -10 6 -14" stroke="#070c1a" stroke-width="5" fill="none"/>
+    <!-- 灯笼 -->
+    <rect x="38" y="150" width="10" height="16" rx="5" fill="#141b33"/>
+    <rect x="272" y="150" width="10" height="16" rx="5" fill="#141b33"/>
+  </g>
+</svg>

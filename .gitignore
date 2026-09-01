@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+
+# 构建产物
+frontend/dist/
+
+# 运行数据（数据库、图片缓存：仅存在于服务器，不入库）
+backend/data/
+backend/img-cache/
+*.db
+*.sqlite
+*.sqlite3
+
+# 环境变量与密钥（含 Bangumi OAuth、代理等敏感配置）
+.env
+.env.*
+
+# 日志
+*.log
+tmp/
+logs/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

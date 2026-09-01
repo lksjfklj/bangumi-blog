@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 170 150">
+  <g>
+    <!-- 书脊 -->
+    <rect x="78" y="26" width="14" height="98" rx="3" fill="#1c1738"/>
+    <!-- 左页 -->
+    <path d="M12 34 Q 46 24 82 32 L 82 124 Q 46 116 12 126 Z" fill="#f4ecd4" stroke="#8a6a3f" stroke-width="2"/>
+    <!-- 右页 -->
+    <path d="M158 34 Q 124 24 88 32 L 88 124 Q 124 116 158 126 Z" fill="#e8dcc0" stroke="#8a6a3f" stroke-width="2"/>
+    <!-- 封面 -->
+    <path d="M8 30 Q 44 18 80 28 L 80 122 Q 44 112 8 122 Z" fill="none" stroke="#b48aff" stroke-width="3"/>
+    <path d="M162 30 Q 126 18 90 28 L 90 122 Q 126 112 162 122 Z" fill="none" stroke="#b48aff" stroke-width="3"/>
+    <!-- 星星 -->
+    <path d="M80 64 l 7 13 15 2 -11 10 3 15 -14 -7 -14 7 3 -15 -11 -10 15 -2 Z" fill="#f2b94e"/>
+    <!-- 文字线 -->
+    <g stroke="#b3a48c" stroke-width="2.4" stroke-linecap="round">
+      <path d="M26 58 h 28 M26 72 h 36 M26 86 h 24"/>
+      <path d="M116 58 h 28 M116 72 h 36 M116 86 h 24"/>
+    </g>
+    <!-- 飘散星光 -->
+    <g fill="#f6e7ae">
+      <circle cx="34" cy="22" r="2.6" opacity=".9"/><circle cx="140" cy="18" r="2" opacity=".7"/>
+      <circle cx="150" cy="40" r="1.6" opacity=".6"/>
+    </g>
+  </g>
+</svg>
