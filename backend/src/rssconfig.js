@@ -40,7 +40,7 @@ function mergeSources(defaults, stored) {
       if (hit.enabled === false) continue; // 用户关闭
       out.push({ ...d, ...hit, enabled: true });
     } else {
-      out.push({ ...d, enabled: true });
+      out.push({ ...d }); // 保留默认 enabled 状态，避免把默认停用的源强制启用
     }
   }
   for (const s of stored) {

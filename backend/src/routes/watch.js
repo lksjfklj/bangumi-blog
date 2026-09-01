@@ -44,12 +44,6 @@ const DEFAULT_SOURCES = [
     desc: '全球最大动漫资源站（c=1_2 非英语字幕，含各中文字幕组；过滤其他语种发布）', categoryInclude: null,
     magnetFrom: 'infohash', hashFrom: 'nyaa:infoHash', torrentFrom: 'link', sizeFrom: 'nyaa:size', coverFrom: null,
     excludeKeywords: ['vostfr', 'subfrench', 'french', 'multi', 'spanish', 'español', 'latino', 'portuguese', 'portugues', 'german', 'deutsch', 'italian', 'arabic', 'russian', 'thai', 'indonesian', 'vietnamese', 'subsplease', 'erai-raws'] },
-  { key: 'airota', name: '千夏字幕组 Airota', lang: 'zh', emoji: '🌼', url: 'https://www.airota.moe/rss.xml',
-    desc: '千夏字幕组官网 RSS（老牌字幕组）', categoryInclude: ['动画'],
-    magnetFrom: 'auto', torrentFrom: 'enclosure', sizeFrom: null, enabled: false }, // 站点暂不可达，默认停用（后台可启用）
-  { key: 'kamigami', name: '诸神字幕组 Kamigami', lang: 'zh', emoji: '🌙', url: 'https://www.kamigami.org/rss.xml',
-    desc: '诸神字幕组官网 RSS（双语字幕老牌组）', categoryInclude: ['动画'],
-    magnetFrom: 'auto', torrentFrom: 'enclosure', sizeFrom: null, enabled: false } // 站点暂不可达，默认停用（后台可启用）
 ];
 
 // 全局排除：明显非正片视频的资源。注意不要误伤视频发布里常见的技术词（FLAC/无损 是音轨编码，1080p/HEVC 是画质）。
