@@ -1,7 +1,7 @@
-/* 秘封俱乐部 Service Worker v1.0.0
+/* 秘封俱乐部 Service Worker v1.0.1
  * 策略：页面导航网络优先（失败回退缓存），静态资源缓存优先（带 hash 已 immutable），/api 一律不缓存。
  * 升级时修改 VERSION 并重新构建即可让旧缓存整体失效。 */
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.0.1';
 const CACHE_NAME = 'bangumi-blog-' + VERSION;
 const PRECACHE = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
@@ -31,6 +31,7 @@ self.addEventListener('fetch', (e) => {
   if (req.mode === 'navigate') {
     e.respondWith(
       fetch(req).then((res) => {
+        if (!res.ok) return res;
         const copy = res.clone();
         caches.open(CACHE_NAME).then((c) => c.put('/index.html', copy)).catch(() => {});
         return res;
@@ -50,3 +51,6 @@ self.addEventListener('fetch', (e) => {
     }).catch(() => caches.match('/index.html')))
   );
 });
+
+
+
