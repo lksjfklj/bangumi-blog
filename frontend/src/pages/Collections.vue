@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { NButton, NTabs, NTabPane, NEmpty, NSpin, NPagination, NSelect, NPopconfirm, NAlert, NModal, NProgress, useMessage } from 'naive-ui';
-import { api, COLLECT_STATUS, STATUS_COLOR, parseTags } from '../api';
+import { api, COLLECT_STATUS, STATUS_COLOR, parseTags, episodeLabel } from '../api';
 import { useUserStore } from '../stores/user';
 import SubjectCard from '../components/SubjectCard.vue';
 
@@ -20,6 +20,8 @@ const counts = ref({});
 const listSource = ref(''); // 'bangumi' | 'local'
 const bgmTotal = ref(0);    // Bangumi 实时总条数（本地未导入时用于 Tab 展示）
 const tagOptions = ref([]);
+const myUpdates = ref([]);
+const updatesLoading = ref(false);
 const loading = ref(false);
 const importing = ref(false);
 const importJob = ref(null); // { running, done, total, expected, currentType, error }
@@ -148,11 +150,23 @@ async function syncToBgm() {
 
 function login() { location.href = '/login?redirect=/collection'; }
 
+async function loadUpdates() {
+  updatesLoading.value = true;
+  try {
+    const d = await api.get('/watch/my-updates?limit=5');
+    myUpdates.value = d.data || [];
+  } catch (e) {
+    myUpdates.value = [];
+  }
+  updatesLoading.value = false;
+}
+
 onMounted(() => {
   if (route.query.tag) tag.value = String(route.query.tag);
   if (userStore.user) {
     load();
     loadTags();
+    loadUpdates();
   }
 });
 onUnmounted(() => { if (importTimer) clearTimeout(importTimer); });
@@ -188,6 +202,22 @@ watch(() => route.query.tag, (v) => {
             <template #trigger><n-button size="small" secondary>推送本地收藏到 Bangumi</n-button></template>
             将本地收藏状态推送到 Bangumi？收藏较多时可能需要几分钟。
           </n-popconfirm>
+        </div>
+      </div>
+
+      <div v-if="!updatesLoading && myUpdates.length" class="updates-bar" v-reveal>
+        <div class="upd-head">
+          <span class="upd-title">📣 你追的番有更新</span>
+          <span class="spacer"></span>
+          <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
+        </div>
+        <div class="upd-list">
+          <router-link v-for="u in myUpdates" :key="u.series_key" :to="{ path: '/watch', query: { my: '1', q: u.series_title || u.name_cn || u.name } }" class="upd-item" :title="'查看 ' + (u.name_cn || u.name || u.series_title) + ' 的更新'">
+            <span class="upd-name">{{ u.name_cn || u.name || u.series_title }}</span>
+            <n-tag v-if="u.episode" size="small" :bordered="false" type="warning" round>{{ episodeLabel(u.episode) }}</n-tag>
+            <span class="spacer"></span>
+            <span class="upd-time">{{ (u.published_at || '').slice(5, 10) }}</span>
+          </router-link>
         </div>
       </div>
 
@@ -248,6 +278,16 @@ watch(() => route.query.tag, (v) => {
 .actions { display: flex; gap: 8px; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin: 12px 0 2px; flex-wrap: wrap; }
 .tag-count { font-size: 13px; }
+.updates-bar { margin: 12px 0 2px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 14px; padding: 12px 14px 8px; }
+.updates-bar .spacer { flex: 1; }
+.upd-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.upd-title { font-size: 14px; font-weight: 700; color: var(--accent); }
+.upd-list { display: flex; flex-direction: column; }
+.upd-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 2px; border-bottom: 1px dashed var(--border); text-decoration: none; color: inherit; }
+.upd-item:last-child { border-bottom: none; }
+.upd-item:hover .upd-name { color: var(--accent); }
+.upd-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.upd-time { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .import-box { padding: 4px 2px; }
 .import-tip { margin: 0 0 14px; line-height: 1.6; }
 .import-done { margin: 12px 0 0; }

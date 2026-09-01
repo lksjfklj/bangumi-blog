@@ -31,6 +31,21 @@ module.exports = {
     proxy: env.BANGUMI_PROXY || '',
     userAgent: env.BANGUMI_USER_AGENT || 'bangumi-blog/1.0 (personal site by liyu)'
   },
+  watch: {
+    // 番剧 RSS 抓取出口代理（默认复用 Bangumi 代理；可用 WATCH_PROXY 单独指定）
+    proxy: env.WATCH_PROXY || env.BANGUMI_PROXY || ''
+  },
+  // 失败告警渠道（RSS 抓取失败 / 监控异常时推送，任一配置即可）
+  //   NOTIFY_SERVERCHAN_KEY=xxx              Server酱 SendKey（sctapi.ftqq.com）
+  //   NOTIFY_TELEGRAM_BOT_TOKEN=xxx          Telegram Bot Token
+  //   NOTIFY_TELEGRAM_CHAT_ID=xxx            接收消息 chat_id（群组 -100 开头）
+  //   NOTIFY_WEBHOOK=https://example.com/hook 通用 Webhook（POST JSON {title, body}）
+  notify: {
+    serverchanKey: env.NOTIFY_SERVERCHAN_KEY || '',
+    telegramBotToken: env.NOTIFY_TELEGRAM_BOT_TOKEN || '',
+    telegramChatId: env.NOTIFY_TELEGRAM_CHAT_ID || '',
+    webhook: env.NOTIFY_WEBHOOK || ''
+  },
   adminToken: env.ADMIN_TOKEN || '',
   // 站长账号：此 Bangumi UID 对应的用户拥有写权限（博客管理/只读访客模式基准）
   ownerBangumiUid: env.OWNER_BANGUMI_UID ? +env.OWNER_BANGUMI_UID : 0,
@@ -39,4 +54,3 @@ module.exports = {
   imgCacheDir: env.IMG_CACHE_DIR || path.join(__dirname, '..', 'img-cache'),
   enableBlog: env.ENABLE_BLOG !== '0'
 };
-

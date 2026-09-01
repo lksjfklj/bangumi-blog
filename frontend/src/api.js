@@ -37,6 +37,15 @@ export const SUBJECT_TYPES = { 1: '书籍', 2: '动画', 3: '音乐', 4: '游戏
 export const COLLECT_STATUS = { 1: '想看', 2: '看过', 3: '在看', 4: '搁置', 5: '抛弃' };
 export const STATUS_COLOR = { 1: 'info', 2: 'success', 3: 'warning', 4: 'default', 5: 'error' };
 
+// 话数显示：S1E20 这类季-集格式直接展示，其余显示为「第 X 话」
+export function episodeLabel(ep) {
+  if (!ep) return '';
+  const str = String(ep);
+  if (/^S\d{1,2}E\d{1,3}$/i.test(str)) return str;
+  if (/^(?:第|全).+话$/.test(str)) return str;
+  return '第 ' + str + ' 话';
+}
+
 export function fmtDate(s) {
   if (!s) return '';
   const d = new Date(s);

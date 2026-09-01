@@ -3,10 +3,22 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { fetch } = require('undici');
+const { fetch, ProxyAgent } = require('undici');
 const { pool } = require('../db');
+const { shrinkCover } = require('../imgutil');
 const { requireOwner } = require('../auth');
 const router = express.Router();
+const config = require('../config');
+
+// 出口代理（服务器 mihomo/clash）：与 watch 模块一致，国外源统一走代理
+let dispatcher = null;
+if (config.bangumi.proxy) dispatcher = new ProxyAgent(config.bangumi.proxy);
+
+// fetch 封装：未配置代理时不传 dispatcher（undici 不允许 null dispatcher）
+async function fetchVia(url, opts = {}, direct) {
+  if (!direct && dispatcher) opts.dispatcher = dispatcher;
+  return fetch(url, opts);
+}
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
@@ -56,7 +68,8 @@ const SOURCES = [
     emoji: '📚',
     url: 'https://fuwanovel.net/feed',
     desc: '英文视觉小说/Galgame 资讯站',
-    apiUrl: 'https://fuwanovel.moe/wp-json/wp/v2/posts?per_page=30&_embed=1'
+    apiUrl: 'https://fuwanovel.moe/wp-json/wp/v2/posts?per_page=30&_embed=1',
+    direct: true // fuwanovel.moe 对代理出口 IP 403，服务器直连可用
   },
   {
     key: 'animecorner',
@@ -189,7 +202,7 @@ function xmlField(xml, tag) {
 }
 
 // 封面图下载到服务器本地缓存（避免用户网络无法直连国外/云图源）
-async function localizeCover(url) {
+async function localizeCover(url, direct) {
   try {
     if (!url) return '';
     const u = new URL(url);
@@ -200,11 +213,15 @@ async function localizeCover(url) {
     const file = path.join(newsImgDir, key + ext);
     if (fs.existsSync(file) && fs.statSync(file).size > 0) return '/api/newsimg/' + key + ext;
     fs.mkdirSync(newsImgDir, { recursive: true });
-    const res = await fetch(url, { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': UA } });
+    const res = await fetchVia(url, { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': UA } }, direct);
     if (!res.ok) return url;
-    const buf = Buffer.from(await res.arrayBuffer());
+    let buf = Buffer.from(await res.arrayBuffer());
     if (!buf.length) return url;
-    fs.writeFileSync(file, buf);
+    // 大图缩到 640px 再落盘：新闻封面动辄 1-6MB，缩略后通常只剩 50-100KB
+    const shrunk = await shrinkCover(buf, ext);
+    buf = shrunk.buf; ext = shrunk.ext;
+    const outFile = path.join(newsImgDir, key + ext);
+    fs.writeFileSync(outFile, buf);
     return '/api/newsimg/' + key + ext;
   } catch (e) { return url; }
 }
@@ -214,10 +231,10 @@ async function localizeCover(url) {
 async function fetchApiCovers(src) {
   if (!src.apiUrl) return new Map();
   try {
-    const res = await fetch(src.apiUrl, {
+    const res = await fetchVia(src.apiUrl, {
       headers: { 'User-Agent': UA, Accept: 'application/json' },
       signal: AbortSignal.timeout(FETCH_TIMEOUT)
-    });
+    }, src.direct);
     if (!res.ok) return new Map();
     const list = await res.json();
     const map = new Map();
@@ -229,9 +246,9 @@ async function fetchApiCovers(src) {
   } catch (e) { return new Map(); }
 }
 
-async function fetchOgImage(url) {
+async function fetchOgImage(url, direct) {
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'follow' });
+    const res = await fetchVia(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'follow' }, direct);
     if (!res.ok) return '';
     const html = await res.text();
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
@@ -244,10 +261,10 @@ async function fetchOgImage(url) {
 async function fetchOne(src) {
   let scrapedCount = 0;
   const apiCovers = await fetchApiCovers(src);
-  const res = await fetch(src.url, {
+  const res = await fetchVia(src.url, {
     headers: { 'User-Agent': UA, Accept: 'application/rss+xml, application/xml, text/xml, */*' },
     signal: AbortSignal.timeout(FETCH_TIMEOUT)
-  });
+  }, src.direct);
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const xml = await res.text();
   const items = [];
@@ -270,7 +287,7 @@ async function fetchOne(src) {
     if (src.key === 'gcores') cover = extractFirstImg(description);
     else cover = extractFirstImg(description) || extractFirstImg(xmlField(block, 'content:encoded'));
     if (!cover) cover = apiCovers.get(String(link).replace(/\/$/, '').toLowerCase()) || '';
-    if (!cover && src.scrapeCover && scrapedCount < MAX_SCRAPE_PER_RUN) { scrapedCount++; cover = await fetchOgImage(link); }
+    if (!cover && src.scrapeCover && scrapedCount < MAX_SCRAPE_PER_RUN) { scrapedCount++; cover = await fetchOgImage(link, src.direct); }
     let text = stripHtml(decodeEntities(description)); // 先解码实体/去 CDATA，再剥标签
     text = cleanSummary(text);
     const summary = truncate(text, 200);
@@ -282,7 +299,7 @@ async function fetchOne(src) {
   // 入库（去重）
   for (const it of items) {
     try {
-      it.cover = await localizeCover(it.cover);
+      it.cover = await localizeCover(it.cover, src.direct);
       await pool.query(
         `INSERT OR IGNORE INTO news (source, title, summary, link, cover, published_at) VALUES (?, ?, ?, ?, ?, ?)`,
         [it.source, it.title, it.summary, it.link, it.cover, it.published_at]
@@ -342,6 +359,8 @@ router.get('/', async (req, res, next) => {
       [...args, size, offset]
     );
     const [cnt] = await pool.query('SELECT COUNT(*) AS total FROM news' + where, args);
+    // 列表 60s 内浏览器/CDN 直接复用，降低小机查询压力
+    res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
     res.json({ data: rows, total: cnt[0].total, page, size });
   } catch (e) { next(e); }
 });
@@ -383,4 +402,9 @@ router.post('/refresh', requireOwner, async (req, res, next) => {
   }
 })();
 
-module.exports = { router, startScheduler, runOnce };
+function getStatus() {
+  return { module: 'news', running, lastRunAt, lastError };
+}
+
+module.exports = { router, startScheduler, runOnce, getStatus };
+

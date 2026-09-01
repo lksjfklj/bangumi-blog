@@ -26,3 +26,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# 番剧更新封面缓存（复用资讯图缓存目录）
+backend/news-img/

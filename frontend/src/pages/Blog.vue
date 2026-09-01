@@ -255,7 +255,7 @@ onMounted(async () => {
       <n-spin :show="newsLoading">
         <div v-for="n in newsList" :key="n.id" class="news-card">
           <a class="news-cover" :href="n.link" target="_blank" rel="noopener">
-            <img v-if="n.cover" :src="n.cover" loading="lazy" alt="" />
+            <img v-if="n.cover" :src="n.cover" loading="lazy" decoding="async" alt="" />
             <span v-else class="cover-ph">{{ sourceEmoji(n.source) }}</span>
           </a>
           <div class="news-body">

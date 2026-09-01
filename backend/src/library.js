@@ -260,4 +260,14 @@ function startScheduler() {
   timer = setInterval(() => { ensureSync().catch(() => {}); }, 12 * 3600 * 1000);
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, regionsOf };
+async function getStatus() {
+  let s = null;
+  try { s = await syncStatus(); } catch (e) {}
+  return {
+    module: 'library',
+    syncing: !!(s && s.syncing),
+    lastSync: s && s.lastSync ? { ok: !!s.lastSync.ok, at: s.lastSync.at, counts: s.lastSync.counts } : null
+  };
+}
+
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, regionsOf, getStatus };

@@ -11,6 +11,7 @@ const router = useRouter();
 const nav = [
   { to: '/', label: '首页' },
   { to: '/anime', label: '番剧库' },
+  { to: '/watch', label: '新番更新' },
   { to: '/collection', label: '我的追番' },
   { to: '/blog', label: '博客' },
   { to: '/announcements', label: '公告' },
@@ -21,6 +22,7 @@ const activeKey = computed(() => {
   const p = route.path;
   if (p === '/') return '/';
   if (p.startsWith('/anime') || p.startsWith('/subject/')) return '/anime';
+  if (p.startsWith('/watch')) return '/watch';
   if (p.startsWith('/collection')) return '/collection';
   if (p.startsWith('/blog')) return '/blog';
   if (p.startsWith('/announcements')) return '/announcements';

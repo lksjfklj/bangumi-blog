@@ -1,0 +1,19 @@
+{
+  "name": "秘封俱乐部",
+  "short_name": "秘封俱乐部",
+  "description": "追番、搜番、Bangumi 收藏联动、二次元资讯与个人博客",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101624",
+  "theme_color": "#101624",
+  "lang": "zh-CN",
+  "categories": ["entertainment", "anime", "books"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

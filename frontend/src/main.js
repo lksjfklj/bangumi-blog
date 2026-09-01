@@ -1,6 +1,5 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
-import naive from 'naive-ui';
 import App from './App.vue';
 import router from './router';
 import './assets/theme.css';
@@ -25,6 +24,13 @@ app.directive('reveal', {
 
 app.use(createPinia());
 app.use(router);
-app.use(naive);
+// naive-ui 组件已按需在各自 .vue 文件中 import，此处不再全局注册，主包体积大幅下降
 initTheme();
 app.mount('#app');
+
+// PWA：注册 Service Worker（仅生产环境，支持加到主屏 + 简单离线兜底）
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

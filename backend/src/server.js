@@ -1,5 +1,6 @@
 // server.js - 入口
 const express = require('express');
+const compression = require('compression');
 const path = require('path');
 const fs = require('fs');
 const cookieParser = require('cookie-parser');
@@ -9,6 +10,8 @@ const { getUserBySession } = require('./auth');
 
 const app = express();
 app.disable('x-powered-by'); // 不暴露框架版本指纹
+// gzip 压缩：1核小机带宽有限，文本/JSON/静态资源先压缩再传输（图片本身已压缩的不再处理）
+app.use(compression({ threshold: 1024 }));
 app.set('trust proxy', true);
 app.use(cookieParser());
 app.use(express.json({ limit: '8mb' }));
@@ -27,6 +30,9 @@ app.use('/api', require('./routes/collections'));
 app.use('/api/blog', require('./routes/blog'));
 const news = require('./routes/news');
 app.use('/api/news', news.router);
+const watch = require('./routes/watch');
+const library = require('./library');
+app.use('/api/watch', watch.router);
 app.use('/api/announce', require('./routes/announce'));
 app.use('/api/blog/upload', require('./routes/upload'));
 
@@ -68,7 +74,7 @@ app.get('/sitemap.xml', async (req, res, next) => {
     const { pool } = require('./db');
     const [rows] = await pool.query('SELECT slug, updated_at FROM posts WHERE published = 1');
     const today = new Date().toISOString().slice(0, 10);
-    const locs = ['/', '/anime', '/collection', '/blog', '/about']
+    const locs = ['/', '/anime', '/watch', '/collection', '/blog', '/about']
       .map(p => '<url><loc>' + xmlEsc(config.publicBase + p) + '</loc><lastmod>' + today + '</lastmod></url>');
     for (const r of rows) {
       const mod = r.updated_at ? new Date(r.updated_at).toISOString().slice(0, 10) : today;
@@ -80,7 +86,36 @@ app.get('/sitemap.xml', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-app.get('/api/health', (req, res) => res.json({ ok: true, time: Date.now() }));
+// 健康检查：汇总各抓取模块状态 + 数据库连通性 + 进程信息（供 UptimeRobot 等外部监控）
+app.get('/api/health', async (req, res, next) => {
+  try {
+    const { pool } = require('./db');
+    let dbOk = false;
+    try {
+      const [rows] = await pool.query('SELECT 1 AS ok');
+      dbOk = !!(rows && rows[0] && rows[0].ok === 1);
+    } catch (e) { dbOk = false; }
+    const [newsS, watchS, libS] = await Promise.all([
+      Promise.resolve(news.getStatus ? news.getStatus() : null),
+      Promise.resolve(watch.getStatus ? watch.getStatus() : null),
+      Promise.resolve(library.getStatus ? library.getStatus() : null)
+    ]);
+    const problems = [];
+    if (!dbOk) problems.push('db');
+    if (newsS && newsS.lastError) problems.push('news:' + newsS.lastError);
+    if (watchS && watchS.lastError) problems.push('watch:' + watchS.lastError);
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ok: problems.length === 0,
+      time: Date.now(),
+      uptime: Math.floor(process.uptime()),
+      process: { pid: process.pid, memMB: Math.round(process.memoryUsage().rss / 1048576) },
+      db: dbOk ? 'ok' : 'error',
+      modules: { news: newsS, watch: watchS, library: libS },
+      problems
+    });
+  } catch (e) { next(e); }
+});
 
 // 静态前端
 const dist = path.join(__dirname, '..', '..', 'frontend', 'dist');
@@ -125,11 +160,13 @@ app.use((err, req, res, next) => {
     console.error('[db] init failed:', e.message);
   }
   news.startScheduler();
-  const library = require('./library');
+  watch.startScheduler();
+
   library.startScheduler();
   app.listen(config.port, config.host, () => {
     console.log(`[server] listening on ${config.port}`);
   });
 })();
+
 
 

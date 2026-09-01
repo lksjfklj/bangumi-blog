@@ -5,6 +5,7 @@ const routes = [
   { path: '/', name: 'home', component: () => import('./pages/Home.vue'), meta: { title: '首页' } },
   { path: '/login', name: 'login', component: () => import('./pages/Login.vue'), meta: { title: '登录' } },
   { path: '/anime', name: 'anime', component: () => import('./pages/Library.vue'), meta: { title: '番剧库' } },
+  { path: '/watch', name: 'watch', component: () => import('./pages/Watch.vue'), meta: { title: '新番更新' } },
   { path: '/subject/:id', name: 'subject', component: () => import('./pages/SubjectDetail.vue') },
   { path: '/collection', name: 'collection', component: () => import('./pages/Collections.vue'), meta: { title: '我的追番', auth: true } },
   { path: '/announcements', name: 'announcements', component: () => import('./pages/Announcements.vue'), meta: { title: '公告' } },

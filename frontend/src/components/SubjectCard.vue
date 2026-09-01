@@ -20,6 +20,8 @@ const allTags = computed(() => {
   return out.slice(0, 5);
 });
 const coverFailed = ref(false);
+// 首页放送表（首屏上方）优先加载，其余列表默认 auto
+const fetchP = computed(() => (props.calendar ? 'high' : 'auto'));
 const router = useRouter();
 const cover = computed(() => {
   const imgs = props.subject.images;
@@ -61,7 +63,7 @@ function goTag(t, e) {
 <template>
   <router-link :to="'/subject/' + subject.id" class="subject-card" :title="name">
     <div class="cover">
-      <img v-if="cover && !coverFailed" :src="cover" :alt="name" loading="lazy" @error="coverFailed = true" />
+      <img v-if="cover && !coverFailed" :src="cover" :alt="name" loading="lazy" decoding="async" :fetchpriority="fetchP" @error="coverFailed = true" />
       <div v-else class="no-cover">{{ name.slice(0, 2) }}</div>
       <span v-if="typeLabel" class="badge">{{ typeLabel }}</span>
       <span v-if="subject.rating && subject.rating.total" class="score">{{ scoreText(subject.rating.score) }}</span>

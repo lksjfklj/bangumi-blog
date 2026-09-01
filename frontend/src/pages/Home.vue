@@ -1,31 +1,34 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { NSpin, NTabs, NTabPane, NButton, NEmpty, NTag } from 'naive-ui';
-import { api, fmtDate } from '../api';
+import { api, fmtDate, episodeLabel } from '../api';
 import SubjectCard from '../components/SubjectCard.vue';
+import { useUserStore } from '../stores/user';
 
+const userStore = useUserStore();
 const calendar = ref([]);
 const loading = ref(true);
 const jsDay = new Date().getDay(); // 0=周日
 const activeDay = ref(jsDay === 0 ? 7 : jsDay);
 const posts = ref([]);
 const postsLoading = ref(true);
+const myUpdates = ref([]);
+const loadingMy = ref(false);
 
 const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
 const dayList = computed(() => calendar.value[activeDay.value - 1] || null);
 
-onMounted(async () => {
-  try {
-    calendar.value = await api.get('/anime/calendar');
-  } catch (e) {
-    calendar.value = [];
-  }
-  loading.value = false;
-  try {
-    const d = await api.get('/blog/posts?size=4');
-    posts.value = d.data || [];
-  } catch (e) { /* ignore */ }
-  postsLoading.value = false;
+onMounted(() => {
+  // 并行拉取放送表与最新文章，避免串行等待，首屏更快
+  const p1 = api.get('/anime/calendar').then(d => { calendar.value = d; }).catch(() => { calendar.value = []; })
+    .finally(() => { loading.value = false; });
+  const p2 = api.get('/blog/posts?size=4').then(d => { posts.value = d.data || []; }).catch(() => { /* ignore */ })
+    .finally(() => { postsLoading.value = false; });
+  const p3 = userStore.isLoggedIn
+    ? api.get('/watch/my-updates?limit=5').then(d => { myUpdates.value = d.data || []; }).catch(() => { myUpdates.value = []; })
+      .finally(() => { loadingMy.value = false; })
+    : Promise.resolve();
+  Promise.all([p1, p2, p3]);
 });
 </script>
 
@@ -57,6 +60,24 @@ onMounted(async () => {
         <span>✨ 新番放送</span><span>🌙 收藏同步</span><span>📖 个人博客</span>
       </div>
     </section>
+
+    <div v-if="!loadingMy && myUpdates.length" class="my-update-box" v-reveal>
+      <div class="mu-head">
+        <span class="mu-title">📣 我追的更了</span>
+        <span class="mu-sub">近 30 天你收藏的番有新资源</span>
+        <span class="spacer"></span>
+        <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
+      </div>
+      <div class="mu-list">
+        <router-link v-for="u in myUpdates" :key="u.series_key" :to="{ path: '/watch', query: { my: '1', q: u.series_title || u.name_cn || u.name } }" class="mu-item" :title="'查看 ' + (u.name_cn || u.name || u.series_title) + ' 的更新'">
+          <span class="mu-name">{{ u.name_cn || u.name || u.series_title }}</span>
+          <n-tag v-if="u.episode" size="small" :bordered="false" type="warning" round>{{ episodeLabel(u.episode) }}</n-tag>
+          <n-tag v-if="u.sub_group" size="small" :bordered="false" round>{{ u.sub_group }}</n-tag>
+          <span class="spacer"></span>
+          <span class="mu-time">{{ fmtDate(u.published_at) }}</span>
+        </router-link>
+      </div>
+    </div>
 
     <div class="tori-divider" v-reveal><span>⛩</span></div>
     <div class="section-title" v-reveal>本周放送</div>
@@ -177,6 +198,17 @@ onMounted(async () => {
   0%, 100% { transform: translateY(0) rotate(0deg); }
   50% { transform: translateY(-12px) rotate(20deg); }
 }
+.my-update-box { margin: 16px 0 2px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 16px; padding: 14px 16px 10px; box-shadow: 0 6px 18px rgba(0,0,0,.3); }
+.my-update-box .spacer { flex: 1; }
+.mu-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.mu-title { font-size: 15px; font-weight: 700; color: var(--accent); }
+.mu-sub { font-size: 12px; color: var(--text-dim); }
+.mu-list { display: flex; flex-direction: column; }
+.mu-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 4px; border-bottom: 1px dashed var(--border); text-decoration: none; color: inherit; }
+.mu-item:last-child { border-bottom: none; }
+.mu-item:hover .mu-name { color: var(--accent); }
+.mu-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.mu-time { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .post-card {
   display: block; margin: 10px 0; padding: 16px 20px;
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
