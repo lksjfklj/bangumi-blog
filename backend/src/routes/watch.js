@@ -489,6 +489,7 @@ async function runOnce() {
   await reloadConfig();
   const sources = SOURCES_CACHE;
   try {
+    lastError = ''; // 每轮重置：本轮全部成功则不显示历史失败（偶发失败不再永久挂在页面上）
     for (const src of sources) {
       if (src.enabled === false) continue; // 后台停用的源不抓取
       let scraped = 0;

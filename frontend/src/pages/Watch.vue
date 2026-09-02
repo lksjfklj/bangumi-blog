@@ -33,6 +33,10 @@ const sources = ref([]);
 const filterOptions = ref({ sub_groups: [], qualities: [] });
 const lastRunAt = ref(0);
 const lastError = ref('');
+// 告警提示：同一错误「显示一次后点掉就不再弹出」，直到错误内容变化（localStorage 记忆）
+const dismissedErr = ref(localStorage.getItem('watch_dismissed_err') || '');
+const showErr = computed(() => lastError.value && lastError.value !== dismissedErr.value);
+function dismissErr() { dismissedErr.value = lastError.value; localStorage.setItem('watch_dismissed_err', dismissedErr.value); }
 const refreshing = ref(false);
 const SOURCE_MAP = {};
 
@@ -274,7 +278,7 @@ onMounted(() => {
       <span class="spacer2"></span>
       <span v-if="total" class="sync-hint">共 {{ total }} 部番剧有更新</span>
     </div>
-    <div v-if="lastError" class="sync-err">⚠️ {{ lastError }}（可通过「配置 → 测试通知」接入告警）</div>
+    <div v-if="showErr" class="sync-err"><span>⚠️ {{ lastError }}（可通过「配置 → 测试通知」接入告警）</span><span class="sync-err-dismiss" @click="dismissErr">知道了</span></div>
 
     <!-- 骨架屏：首屏/筛选时显示 -->
     <div v-if="loading" class="skeleton-list">
@@ -393,7 +397,9 @@ onMounted(() => {
 .chip.on { background: var(--tag-gold-bg); color: var(--tag-gold-text); border-color: var(--tag-gold-border); font-weight: 600; }
 .chip .cnt { opacity: .72; font-size: 12px; }
 .sync-hint { font-size: 12px; color: var(--text-dim); }
-.sync-err { margin: 4px 0 10px; font-size: 12px; color: var(--accent-4); background: var(--viewer-bg); border: 1px solid var(--viewer-border); border-radius: 10px; padding: 6px 12px; }
+.sync-err { margin: 4px 0 10px; font-size: 12px; color: var(--accent-4); background: var(--viewer-bg); border: 1px solid var(--viewer-border); border-radius: 10px; padding: 6px 12px; display: flex; align-items: center; gap: 10px; }
+.sync-err-dismiss { flex-shrink: 0; margin-left: auto; color: var(--accent-1); cursor: pointer; font-weight: 600; user-select: none; }
+.sync-err-dismiss:hover { text-decoration: underline; }
 .skeleton-list { margin-top: 4px; }
 
 .group-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; margin-bottom: 14px; overflow: hidden; transition: border-color .2s, box-shadow .2s; }
