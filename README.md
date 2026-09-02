@@ -130,4 +130,4 @@ pnpm dev
 
 ## 📄 License
 
-当前未指定开源许可证。如需正式开源，请补充 `LICENSE` 文件后再对外分发。
+[MIT](LICENSE) © 2026 lksjfklj
