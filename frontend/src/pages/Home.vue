@@ -14,9 +14,33 @@ const posts = ref([]);
 const postsLoading = ref(true);
 const myUpdates = ref([]);
 const loadingMy = ref(false);
+const progressMap = ref({});
 
 const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
 const dayList = computed(() => calendar.value[activeDay.value - 1] || null);
+
+// 收藏番放送进度：第 ep_status / 共 eps 话
+function progressOf(s) {
+  const p = progressMap.value[s.id];
+  if (!p || !p.ep_status) return null;
+  const total = +s.eps || 0;
+  const cur = +p.ep_status || 0;
+  return { cur, total, pct: total ? Math.min(100, Math.round(cur / total * 100)) : 0 };
+}
+// 开播倒计时：air_date 在未来 14 天内
+function countdownOf(s) {
+  if (!s.air_date) return '';
+  const t = new Date(String(s.air_date));
+  if (isNaN(t)) return '';
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayDiff = Math.round((t - today) / 86400000);
+  if (dayDiff < 0) return '';
+  if (dayDiff === 0) return '今日播出';
+  if (dayDiff === 1) return '明晚播出';
+  if (dayDiff <= 14) return '还有 ' + dayDiff + ' 天开播';
+  return '';
+}
 
 onMounted(() => {
   // 并行拉取放送表与最新文章，避免串行等待，首屏更快
@@ -25,8 +49,10 @@ onMounted(() => {
   const p2 = api.get('/blog/posts?size=4').then(d => { posts.value = d.data || []; }).catch(() => { /* ignore */ })
     .finally(() => { postsLoading.value = false; });
   const p3 = userStore.isLoggedIn
-    ? api.get('/watch/my-updates?limit=5').then(d => { myUpdates.value = d.data || []; }).catch(() => { myUpdates.value = []; })
-      .finally(() => { loadingMy.value = false; })
+    ? Promise.all([
+        api.get('/watch/my-updates?limit=5').then(d => { myUpdates.value = d.data || []; }).catch(() => { myUpdates.value = []; }),
+        api.get('/me/calendar-progress').then(d => { progressMap.value = d || {}; }).catch(() => { progressMap.value = {}; })
+      ]).finally(() => { loadingMy.value = false; })
     : Promise.resolve();
   Promise.all([p1, p2, p3]);
 });
@@ -85,7 +111,14 @@ onMounted(() => {
       <n-tabs v-model:value="activeDay" type="line" animated size="medium">
         <n-tab-pane v-for="(day, i) in calendar" :key="i" :name="i + 1" :tab="'周' + WEEK[i]">
           <div v-if="day.items && day.items.length" class="card-grid">
-            <SubjectCard v-for="s in day.items.slice(0, 24)" :key="s.id" :subject="s" :calendar="true" />
+            <div v-for="s in day.items.slice(0, 24)" :key="s.id" class="cal-cell">
+              <SubjectCard :subject="s" :calendar="true" />
+              <div v-if="progressOf(s)" class="cal-progress" :title="'看到第 ' + progressOf(s).cur + ' 话 / 共 ' + (progressOf(s).total || '?') + ' 话'">
+                <div class="cp-track"><div class="cp-fill" :style="{ width: progressOf(s).pct + '%' }"></div></div>
+                <span class="cp-txt">第 {{ progressOf(s).cur }}/{{ progressOf(s).total || '?' }} 话</span>
+              </div>
+              <div v-else-if="countdownOf(s)" class="cal-countdown">⏳ {{ countdownOf(s) }}</div>
+            </div>
           </div>
           <n-empty v-else description="暂无放送" />
         </n-tab-pane>
@@ -218,6 +251,19 @@ onMounted(() => {
 .post-card h3 { margin: 0 0 6px; font-size: 17px; color: var(--text); }
 .post-card .summary { color: var(--text-dim); font-size: 13px; margin-bottom: 8px; }
 .post-card .meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+.cal-cell { position: relative; }
+.cal-progress {
+  position: absolute; left: 8px; right: 8px; bottom: 46px; display: flex; align-items: center; gap: 6px;
+  background: rgba(0,0,0,.62); backdrop-filter: blur(4px); border-radius: 999px; padding: 3px 8px;
+}
+.cp-track { flex: 1; height: 5px; background: rgba(255,255,255,.22); border-radius: 999px; overflow: hidden; }
+.cp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; }
+.cp-txt { font-size: 10px; color: #fff; white-space: nowrap; font-weight: 600; }
+.cal-countdown {
+  position: absolute; top: 6px; left: 6px; font-size: 10px; font-weight: 700;
+  background: rgba(229,72,77,.92); color: #fff; padding: 3px 8px; border-radius: 999px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.35);
+}
 @media (max-width: 720px) {
   .hero { padding: 64px 18px 58px; }
   .hero-title { font-size: 36px; letter-spacing: 5px; }
@@ -227,3 +273,4 @@ onMounted(() => {
   .hero-lantern, .hero-ofuda, .hero-bunny, .hero-orb { display: none; }
 }
 </style>
+

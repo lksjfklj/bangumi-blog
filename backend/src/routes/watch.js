@@ -192,7 +192,7 @@ function normalizeSizeText(t) {
   if (!m) return '';
   const v = +m[1];
   const u = m[2].toLowerCase();
-  const map = { b: 1, kb: 1 << 10, mb: 1 << 20, gb: 1 << 30, tb: 1 << 40, kib: 1 << 10, mib: 1 << 20, gib: 1 << 30, tib: 1 << 40 };
+  const map = { b: 1, kb: 1 << 10, mb: 1 << 20, gb: 1 << 30, tb: 2 ** 40, kib: 1 << 10, mib: 1 << 20, gib: 1 << 30, tib: 2 ** 40 };
   return formatSize(v * (map[u] || 1));
 }
 
@@ -201,7 +201,7 @@ function sizeToBytes(t) {
   if (!m) return 0;
   const v = +m[1];
   const u = m[2].toLowerCase();
-  const map = { b: 1, kb: 1 << 10, mb: 1 << 20, gb: 1 << 30, tb: 1 << 40, kib: 1 << 10, mib: 1 << 20, gib: 1 << 30, tib: 1 << 40 };
+  const map = { b: 1, kb: 1 << 10, mb: 1 << 20, gb: 1 << 30, tb: 2 ** 40, kib: 1 << 10, mib: 1 << 20, gib: 1 << 30, tib: 2 ** 40 };
   return Math.round(v * (map[u] || 1));
 }
 
@@ -915,4 +915,6 @@ async function backfill() {
   }
 })();
 
-module.exports = { router, startScheduler, runOnce, getStatus, episodeOf, matchBgm };
+module.exports = { router, startScheduler, runOnce, getStatus, episodeOf, sizeToBytes, matchBgm };
+
+

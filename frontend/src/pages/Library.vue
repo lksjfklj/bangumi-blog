@@ -436,9 +436,15 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 .hot-row { display: flex; align-items: center; gap: 8px; margin: 14px 0 6px; flex-wrap: wrap; font-size: 13px; }
 .hot-tag { cursor: pointer; padding: 4px 12px; border-radius: 999px; font-size: 12px; color: var(--tag-gold-text); background: var(--tag-gold-bg); border: 1px solid var(--tag-gold-border); transition: all .15s; }
 .hot-tag:hover { background: linear-gradient(120deg, var(--accent), var(--accent-2)); border-color: transparent; color: var(--grad-text); transform: translateY(-2px); }
+/* 虚拟列表式优化：离屏卡片跳过渲染，滚动到附近才绘制（配合封面 loading=lazy） */
+.card-grid > a {
+  content-visibility: auto;
+  contain-intrinsic-size: 300px;
+}
 @media (max-width: 720px) {
   .search-bar { flex-wrap: wrap; }
   .search-bar .n-input { width: 100% !important; }
 }
 </style>
+
 

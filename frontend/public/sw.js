@@ -1,7 +1,9 @@
-/* 秘封俱乐部 Service Worker v1.0.1
+
+/* 秘封俱乐部 Service Worker v1.1.0
  * 策略：页面导航网络优先（失败回退缓存），静态资源缓存优先（带 hash 已 immutable），/api 一律不缓存。
+ * 新增：Web Push 通知展示 + 点击通知跳转。
  * 升级时修改 VERSION 并重新构建即可让旧缓存整体失效。 */
-const VERSION = 'v1.0.1';
+const VERSION = 'v1.1.0';
 const CACHE_NAME = 'bangumi-blog-' + VERSION;
 const PRECACHE = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
@@ -52,5 +54,31 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
+// ---------- Web Push 通知 ----------
+self.addEventListener('push', (e) => {
+  let payload = {};
+  try { payload = e.data ? e.data.json() : {}; } catch (err) { /* 非 JSON 则忽略 */ }
+  const title = payload.title || '秘封俱乐部';
+  const options = {
+    body: payload.body || '',
+    icon: payload.icon || '/icons/icon-192.png',
+    badge: payload.badge || '/icons/icon-192.png',
+    data: { url: payload.url || '/collection' },
+    tag: payload.tag || ('update-' + (payload.url || '')),
+    renotify: false
+  };
+  e.waitUntil(self.registration.showNotification(title, options));
+});
 
-
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || '/';
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const client of list) {
+        if ('focus' in client) { client.navigate(url); return client.focus(); }
+      }
+      return self.clients.openWindow(url);
+    })
+  );
+});

@@ -1,8 +1,9 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { NButton, NAvatar, NDropdown, NSpace, NTag } from 'naive-ui';
 import { useUserStore } from '../stores/user';
+import { api } from '../api';
 import { theme as themeStore, toggleTheme } from '../stores/theme';
 
 const userStore = useUserStore();
@@ -32,7 +33,9 @@ const activeKey = computed(() => {
 
 const userOptions = computed(() => {
   const opts = [
-    { label: '我的追番', key: '/collection' }
+    { label: '我的追番', key: '/collection' },
+    { label: '📊 追番统计', key: '/stats' },
+    { label: '🔔 通知设置', key: '/notify' }
   ];
   if (userStore.isOwner) opts.push({ label: '站务管理', key: '/admin' });
   opts.push({ label: '切换账号 / 访客', key: '/login' });
@@ -45,6 +48,29 @@ function onSelect(k) {
   // 站内页面走 SPA 跳转，避免整页刷新
   router.push(k).catch(() => location.assign(k));
 }
+
+// ---------- 新话更新未读角标 ----------
+const unread = ref(0);
+let unreadTimer = null;
+async function fetchUnread() {
+  if (!userStore.user || userStore.viewer) { unread.value = 0; return; }
+  try {
+    const d = await api.get('/watch/updates/unread?limit=1');
+    unread.value = d.unread || 0;
+  } catch (e) { unread.value = 0; }
+}
+watch(() => userStore.user, (u) => {
+  if (u) {
+    fetchUnread();
+    clearInterval(unreadTimer);
+    unreadTimer = setInterval(fetchUnread, 60000);
+  } else {
+    unread.value = 0;
+    clearInterval(unreadTimer);
+  }
+}, { immediate: true });
+onMounted(() => { if (userStore.user) fetchUnread(); });
+onUnmounted(() => clearInterval(unreadTimer));
 </script>
 
 <template>
@@ -55,6 +81,9 @@ function onSelect(k) {
         <router-link v-for="n in nav" :key="n.to" :to="n.to" :class="{ on: activeKey === n.to }">{{ n.label }}</router-link>
       </nav>
       <div class="spacer"></div>
+      <button v-if="userStore.user" class="bell-btn" title="新话更新通知" @click="router.push('/notify')">
+        🔔<span v-if="unread" class="bell-badge">{{ unread > 99 ? '99+' : unread }}</span>
+      </button>
       <button class="theme-toggle" :title="themeStore === 'gensokyo' ? '切换到红魔馆·浅色复古' : '切换到秘封之夜·深色东方'" @click="toggleTheme">
         <span class="tt-ico">{{ themeStore === 'gensokyo' ? '🌹' : '🌙' }}</span>
         <span class="tt-txt">{{ themeStore === 'gensokyo' ? '红魔馆' : '秘封之夜' }}</span>
@@ -128,6 +157,19 @@ function onSelect(k) {
 .theme-toggle .tt-ico { font-size: 15px; }
 @media (max-width: 900px) { .theme-toggle .tt-txt { display: none; } }
 @media (max-width: 720px) { .theme-toggle { padding: 5px 10px; } }
+.bell-btn {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid var(--nav-border); background: var(--bg-soft); cursor: pointer;
+  font-size: 17px; transition: all .18s; color: var(--text-dim);
+}
+.bell-btn:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
+.bell-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 999px; background: #e5484d; color: #fff; font-size: 11px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+  box-shadow: 0 2px 6px rgba(0,0,0,.35);
+}
 @media (max-width: 720px) {
   .nav-inner { gap: 8px; height: auto; min-height: 56px; flex-wrap: wrap; padding: 8px 0; row-gap: 4px; }
   .logo { font-size: 19px; letter-spacing: 1px; }
@@ -137,5 +179,10 @@ function onSelect(k) {
   .nav-lantern { display: none; }
 }
 </style>
+
+
+
+
+
 
 

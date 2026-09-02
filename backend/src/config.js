@@ -46,6 +46,23 @@ module.exports = {
     telegramChatId: env.NOTIFY_TELEGRAM_CHAT_ID || '',
     webhook: env.NOTIFY_WEBHOOK || ''
   },
+  // 站内用户「新话更新」邮件推送（可选）：配置 SMTP 后，用户可在通知设置里填自己的邮箱
+  //   SMTP_HOST / SMTP_PORT / SMTP_SECURE(1) / SMTP_USER / SMTP_PASS / SMTP_FROM
+  smtp: {
+    host: env.SMTP_HOST || '',
+    port: +(env.SMTP_PORT || 465),
+    secure: env.SMTP_SECURE === '1',
+    user: env.SMTP_USER || '',
+    pass: env.SMTP_PASS || '',
+    from: env.SMTP_FROM || (env.SMTP_USER || '')
+  },
+  // Web Push（PWA 桌面/移动推送）：VAPID 密钥对自动生成并存到 data/vapid.json
+  push: {
+    subject: env.VAPID_SUBJECT || 'mailto:' + (env.SMTP_USER || 'admin@example.com'),
+    vapidFile: env.VAPID_FILE || path.join(__dirname, '..', 'data', 'vapid.json')
+  },
+  // HTTPS 反代后面开启后，登录 Cookie 打 Secure 标记（COOKIE_SECURE=1）
+  secureCookies: env.COOKIE_SECURE === '1',
   adminToken: env.ADMIN_TOKEN || '',
   // 站长账号：此 Bangumi UID 对应的用户拥有写权限（博客管理/只读访客模式基准）
   ownerBangumiUid: env.OWNER_BANGUMI_UID ? +env.OWNER_BANGUMI_UID : 0,

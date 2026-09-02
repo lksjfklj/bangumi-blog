@@ -8,6 +8,9 @@ const routes = [
   { path: '/watch', name: 'watch', component: () => import('./pages/Watch.vue'), meta: { title: '新番更新' } },
   { path: '/subject/:id', name: 'subject', component: () => import('./pages/SubjectDetail.vue') },
   { path: '/collection', name: 'collection', component: () => import('./pages/Collections.vue'), meta: { title: '我的追番', auth: true } },
+  { path: '/stats', name: 'stats', component: () => import('./pages/Stats.vue'), meta: { title: '追番统计', auth: true } },
+  { path: '/notify', name: 'notify', component: () => import('./pages/Notifications.vue'), meta: { title: '通知设置', auth: true } },
+  { path: '/share/:uid', name: 'share', component: () => import('./pages/Share.vue') },
   { path: '/announcements', name: 'announcements', component: () => import('./pages/Announcements.vue'), meta: { title: '公告' } },
   { path: '/blog', name: 'blog', component: () => import('./pages/Blog.vue'), meta: { title: '博客' } },
   { path: '/blog/:slug', name: 'post', component: () => import('./pages/PostView.vue') },
@@ -43,6 +46,3 @@ router.afterEach((to) => {
 });
 
 export default router;
-
-
-

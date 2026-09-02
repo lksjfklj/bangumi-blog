@@ -155,20 +155,122 @@ function ensureColumn(table, column, ddl) {
   }
 }
 
+// ---------- 迁移机制 ----------
+// 每新增一个结构变更，往 MIGRATIONS 追加一条（id 递增，sql 或 fn 二选一）。
+// sql 用 CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS 保持可重入；
+// ALTER TABLE 类操作放进 fn（内部用 ensureColumn 保证幂等）。
+const MIGRATIONS = [
+  {
+    id: 2,
+    name: 'watch-push-v2',
+    sql: `
+CREATE TABLE IF NOT EXISTS watch_updates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  episode_id INTEGER NOT NULL,
+  subject_id INTEGER NOT NULL,
+  series_title TEXT DEFAULT '',
+  name_cn TEXT DEFAULT '',
+  name TEXT DEFAULT '',
+  episode TEXT DEFAULT '',
+  sub_group TEXT DEFAULT '',
+  quality TEXT DEFAULT '',
+  magnet TEXT DEFAULT '',
+  link TEXT DEFAULT '',
+  published_at TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  read INTEGER DEFAULT 0,
+  notified INTEGER DEFAULT 0,
+  UNIQUE (user_id, episode_id)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_updates_user_read ON watch_updates(user_id, read, id);
+CREATE INDEX IF NOT EXISTS idx_watch_updates_user_time ON watch_updates(user_id, id);
+
+CREATE TABLE IF NOT EXISTS user_notify_settings (
+  user_id INTEGER PRIMARY KEY,
+  enabled INTEGER DEFAULT 1,
+  serverchan_key TEXT DEFAULT '',
+  telegram_chat_id TEXT DEFAULT '',
+  webhook TEXT DEFAULT '',
+  email TEXT DEFAULT '',
+  updated_at INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  endpoint TEXT NOT NULL,
+  keys TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, endpoint)
+);
+`
+  },
+  {
+    id: 3,
+    name: 'comments-v3',
+    sql: `
+CREATE TABLE IF NOT EXISTS comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL,
+  parent_id INTEGER DEFAULT 0,
+  user_id INTEGER,
+  name TEXT DEFAULT '',
+  email TEXT DEFAULT '',
+  content TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  ip TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, status, id);
+`
+  },
+  {
+    id: 4,
+    name: 'profile-public-v4',
+    fn: () => {
+      ensureColumn('users', 'profile_public', 'profile_public INTEGER DEFAULT 0');
+      ensureColumn('users', 'bio', "bio TEXT DEFAULT ''");
+      ensureColumn('collections', 'subject_tags', 'subject_tags TEXT DEFAULT NULL');
+      ensureColumn('collections', 'watched_at', 'watched_at INTEGER DEFAULT 0');
+    }
+  }
+];
+
+function runMigrations() {
+  db.exec('CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+  const applied = new Set(db.prepare('SELECT id FROM migrations').all().map(r => r.id));
+  for (const m of MIGRATIONS) {
+    if (applied.has(m.id)) continue;
+    db.exec('BEGIN');
+    try {
+      if (m.sql) db.exec(m.sql);
+      if (typeof m.fn === 'function') m.fn();
+      db.prepare('INSERT INTO migrations (id, name) VALUES (?, ?)').run(m.id, m.name);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      console.error('[db] migration #' + m.id + ' (' + m.name + ') failed:', e.message);
+      throw e;
+    }
+  }
+}
+
 function initDb() {
   // 兼容旧库：先补缺失列（多用户/权限体系），再建表/索引。
   // 注意：SCHEMA 中的部分索引（如 idx_users_local_username）引用了新列，
   // 旧库必须先 ALTER TABLE 补列，否则 db.exec(SCHEMA) 会因 "no such column" 整体失败。
-  const migrations = [
+  const legacy = [
     ['collections', 'subject_tags', 'subject_tags TEXT DEFAULT NULL'],
     ['users', 'password_hash', 'password_hash TEXT DEFAULT NULL'],
     ['users', 'is_owner', 'is_owner INTEGER DEFAULT 0'],
     ['sessions', 'kind', "kind TEXT DEFAULT 'user'"]
   ];
-  for (const [table, column, ddl] of migrations) {
+  for (const [table, column, ddl] of legacy) {
     try { ensureColumn(table, column, ddl); } catch (e) { console.error('[db] migrate fail', table, column, e.message); }
   }
   db.exec(SCHEMA);
+  runMigrations();
   // 标记站长账号（OWNER_BANGUMI_UID 对应的 Bangumi 用户拥有全站写权限）
   try {
     if (config.ownerBangumiUid) {
@@ -178,5 +280,3 @@ function initDb() {
 }
 
 module.exports = { pool, initDb, db, dbFile };
-
-

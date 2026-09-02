@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { NButton, NTabs, NTabPane, NEmpty, NSpin, NPagination, NSelect, NPopconfirm, NAlert, NModal, NProgress, useMessage } from 'naive-ui';
+import { NButton, NTabs, NTabPane, NEmpty, NSpin, NPagination, NSelect, NPopconfirm, NAlert, NModal, NProgress, NDropdown, useMessage } from 'naive-ui';
 import { api, COLLECT_STATUS, STATUS_COLOR, parseTags, episodeLabel } from '../api';
 import { useUserStore } from '../stores/user';
 import SubjectCard from '../components/SubjectCard.vue';
@@ -21,6 +21,7 @@ const listSource = ref(''); // 'bangumi' | 'local'
 const bgmTotal = ref(0);    // Bangumi 实时总条数（本地未导入时用于 Tab 展示）
 const tagOptions = ref([]);
 const myUpdates = ref([]);
+const unreadCount = ref(0);
 const updatesLoading = ref(false);
 const loading = ref(false);
 const importing = ref(false);
@@ -153,12 +154,39 @@ function login() { location.href = '/login?redirect=/collection'; }
 async function loadUpdates() {
   updatesLoading.value = true;
   try {
-    const d = await api.get('/watch/my-updates?limit=5');
-    myUpdates.value = d.data || [];
+    const [u, un] = await Promise.all([
+      api.get('/watch/my-updates?limit=5'),
+      api.get('/watch/updates/unread?limit=1').catch(() => ({ unread: 0 }))
+    ]);
+    myUpdates.value = (u && u.data) || [];
+    unreadCount.value = (un && un.unread) || 0;
   } catch (e) {
     myUpdates.value = [];
   }
   updatesLoading.value = false;
+}
+
+const exportOptions = [
+  { label: '导出 JSON', key: 'json' },
+  { label: '导出 CSV（Excel 可直接打开）', key: 'csv' }
+];
+function doExport(fmt) {
+  const a = document.createElement('a');
+  a.href = '/api/collections/export-download?format=' + fmt;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  message.success('导出中，请稍候…');
+}
+
+async function markAllRead() {
+  try {
+    await api.post('/watch/updates/read', {});
+    unreadCount.value = 0;
+    message.success('已全部标记为已读');
+    loadUpdates();
+  } catch (e) { message.error(e.message); }
 }
 
 onMounted(() => {
@@ -202,13 +230,18 @@ watch(() => route.query.tag, (v) => {
             <template #trigger><n-button size="small" secondary>推送本地收藏到 Bangumi</n-button></template>
             将本地收藏状态推送到 Bangumi？收藏较多时可能需要几分钟。
           </n-popconfirm>
+          <n-dropdown trigger="hover" :options="exportOptions" @select="doExport">
+            <n-button size="small" secondary>💾 导出备份</n-button>
+          </n-dropdown>
         </div>
       </div>
 
       <div v-if="!updatesLoading && myUpdates.length" class="updates-bar" v-reveal>
         <div class="upd-head">
           <span class="upd-title">📣 你追的番有更新</span>
+          <n-tag v-if="unreadCount" size="small" type="error" round :bordered="false">{{ unreadCount }} 条未读</n-tag>
           <span class="spacer"></span>
+          <n-button text type="primary" size="small" @click="markAllRead">全部已读</n-button>
           <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
         </div>
         <div class="upd-list">
@@ -292,3 +325,5 @@ watch(() => route.query.tag, (v) => {
 .import-tip { margin: 0 0 14px; line-height: 1.6; }
 .import-done { margin: 12px 0 0; }
 </style>
+
+

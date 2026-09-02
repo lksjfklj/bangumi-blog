@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { NButton, NTag, NModal, NInput, NInputNumber, NPopconfirm, NSwitch, useMessage } from 'naive-ui';
+import { NButton, NTag, NModal, NInput, NInputNumber, NPopconfirm, NSwitch, NRadioGroup, NRadioButton, useMessage } from 'naive-ui';
 import { api, fmtDate } from '../api';
 import { useUserStore } from '../stores/user';
 
@@ -106,7 +106,34 @@ async function removeAnn(id) {
   } catch (e) { message.error(e.message); }
 }
 
-onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); } else router.replace('/'); });
+// ---------- 评论审核 ----------
+const comments = ref([]);
+const commentStatus = ref('pending');
+const STATUS_TEXT = { pending: '待审', approved: '已通过', spam: '垃圾' };
+const STATUS_TYPE = { pending: 'warning', approved: 'success', spam: 'error' };
+
+async function loadComments() {
+  try {
+    const d = await api.get('/blog/comments?status=' + commentStatus.value);
+    comments.value = (d && d.data) || [];
+  } catch (e) { message.error(e.message); }
+}
+async function setCommentStatus(c, status) {
+  try {
+    await api.put('/blog/comments/' + c.id, { status });
+    message.success(status === 'approved' ? '已通过' : status === 'spam' ? '已标记垃圾' : '已恢复待审');
+    loadComments();
+  } catch (e) { message.error(e.message); }
+}
+async function removeComment(id) {
+  try {
+    await api.del('/blog/comments/' + id);
+    message.success('已删除');
+    loadComments();
+  } catch (e) { message.error(e.message); }
+}
+
+onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); loadComments(); } else router.replace('/'); });
 </script>
 
 <template>
@@ -158,6 +185,42 @@ onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); } else router.rep
     </div>
     <div v-if="!posts.length" class="muted" style="padding:40px 0;text-align:center">还没有文章</div>
 
+    <hr style="border-color:var(--nav-border);margin:26px 0" />
+
+    <!-- 评论审核 -->
+    <div class="section-title">
+      <h3>💬 评论审核</h3>
+      <n-radio-group v-model:value="commentStatus" size="small" @update:value="loadComments">
+        <n-radio-button value="pending">待审</n-radio-button>
+        <n-radio-button value="approved">已通过</n-radio-button>
+        <n-radio-button value="spam">垃圾</n-radio-button>
+        <n-radio-button value="all">全部</n-radio-button>
+      </n-radio-group>
+    </div>
+    <div class="comment-card" v-for="c in comments" :key="c.id">
+      <div class="c-head">
+        <span class="c-name">{{ c.name || '匿名' }}</span>
+        <n-tag size="small" :type="STATUS_TYPE[c.status] || 'default'" :bordered="false">{{ STATUS_TEXT[c.status] || c.status }}</n-tag>
+        <span class="c-post">在《{{ c.post_title || '?' }}》</span>
+        <span class="muted">#{{ c.id }}</span>
+      </div>
+      <div class="c-content">{{ c.content }}</div>
+      <div class="meta">
+        <span>{{ fmtDate(c.created_at) }}</span>
+        <span v-if="c.ip" class="muted">IP {{ c.ip }}</span>
+        <span v-if="c.parent_id" class="muted">回复 #{{ c.parent_id }}</span>
+      </div>
+      <div class="opts">
+        <n-button v-if="c.status !== 'approved'" size="tiny" type="success" quaternary @click="setCommentStatus(c, 'approved')">通过</n-button>
+        <n-button v-if="c.status !== 'spam'" size="tiny" type="warning" quaternary @click="setCommentStatus(c, 'spam')">标记垃圾</n-button>
+        <n-popconfirm @positive-click="removeComment(c.id)">
+          <template #trigger><n-button size="tiny" type="error" quaternary>删除</n-button></template>
+          确定删除这条评论？（子回复一并删除）
+        </n-popconfirm>
+      </div>
+    </div>
+    <div v-if="!comments.length" class="muted" style="padding:24px 0;text-align:center">当前状态下没有评论</div>
+
     <!-- 博客编辑弹窗 -->
     <n-modal v-model:show="editing" preset="card" title="编辑文章" style="width:760px;max-width:94vw">
       <div class="edit-form">
@@ -194,8 +257,15 @@ onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); } else router.rep
 .post-card h3 { margin: 0 0 6px; font-size: 17px; }
 .meta { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; display: flex; gap: 12px; }
 .opts { display: flex; gap: 8px; }
+.comment-card { margin: 10px 0; padding: 14px 18px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; }
+.comment-card .c-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.comment-card .c-name { font-weight: 700; color: var(--accent); }
+.comment-card .c-post { font-size: 13px; color: var(--text-dim); }
+.comment-card .c-content { font-size: 14px; line-height: 1.7; color: var(--text); white-space: pre-wrap; margin-bottom: 8px; }
 .edit-form .row { margin-bottom: 12px; }
 .edit-form label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 5px; }
 .publish-row { display: flex; align-items: center; justify-content: space-between; }
 .publish-row label { margin: 0; }
 </style>
+
+

@@ -28,7 +28,8 @@ function verifyPassword(password, stored) {
 }
 
 function setSid(res, token) {
-  res.cookie('sid', token, { httpOnly: true, sameSite: 'lax', maxAge: config.sessionTtlMs });
+  // SameSite=strict + HttpOnly：本站是纯同源 SPA，杜绝跨站携带会话 Cookie（CSRF 主防线之一）
+  res.cookie('sid', token, { httpOnly: true, sameSite: 'strict', secure: config.secureCookies, maxAge: config.sessionTtlMs });
 }
 
 // 是否站长（Bangumi UID 匹配或已标记 is_owner）
@@ -193,6 +194,8 @@ router.get('/me', async (req, res) => {
     username: req.user.username,
     nickname: req.user.nickname,
     avatar: req.user.avatar,
+    profile_public: +req.user.profile_public === 1,
+    bio: req.user.bio || '',
     connected: !!token,
     is_owner: isOwner,
     role
@@ -209,3 +212,4 @@ router.post('/logout', async (req, res, next) => {
 });
 
 module.exports = router;
+

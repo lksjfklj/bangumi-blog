@@ -22,7 +22,7 @@ export const api = {
   get: (p) => request(p),
   post: (p, body) => request(p, { method: 'POST', body: JSON.stringify(body || {}) }),
   put: (p, body) => request(p, { method: 'PUT', body: JSON.stringify(body || {}) }),
-  del: (p) => request(p, { method: 'DELETE' })
+  del: (p, body) => request(p, { method: 'DELETE', body: JSON.stringify(body || {}) })
 };
 
 // Bangumi 图片统一走服务器代理

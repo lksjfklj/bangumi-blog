@@ -1,0 +1,24 @@
+{
+  "name": "bangumi-blog",
+  "version": "1.0.0",
+  "description": "个人二次元番剧资讯站：**番剧库、我的追番（Bangumi 收藏联动）、新番更新（多 RSS 源聚合）、个人博客与公告**。 采用东方 Project「秘封俱乐部」风格深色主题，单机轻量部署（1 核 2GB 小机无压力）。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "cd backend && pnpm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lksjfklj/bangumi-blog.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/lksjfklj/bangumi-blog/issues"
+  },
+  "homepage": "https://github.com/lksjfklj/bangumi-blog#readme"
+}

@@ -7,14 +7,22 @@ const cookieParser = require('cookie-parser');
 const config = require('./config');
 const { initDb } = require('./db');
 const { getUserBySession } = require('./auth');
+const { securityHeaders, originGuard, rateLimit } = require('./security');
+const logger = require('./logger');
 
 const app = express();
 app.disable('x-powered-by'); // 不暴露框架版本指纹
+// 安全响应头 + CSP（放在最前面，所有响应都带上）
+app.use(securityHeaders);
 // gzip 压缩：1核小机带宽有限，文本/JSON/静态资源先压缩再传输（图片本身已压缩的不再处理）
 app.use(compression({ threshold: 1024 }));
 app.set('trust proxy', true);
 app.use(cookieParser());
 app.use(express.json({ limit: '8mb' }));
+// 跨站写请求防护（CSRF 第二道防线：Origin/Referer 校验）
+app.use(originGuard);
+// /api 全局限流（1 核小机防爬/防刷，阈值宽松不影响正常使用）
+app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300, name: 'api' }));
 
 // 会话注入
 app.use(async (req, res, next) => {
@@ -35,6 +43,10 @@ const library = require('./library');
 app.use('/api/watch', watch.router);
 app.use('/api/announce', require('./routes/announce'));
 app.use('/api/blog/upload', require('./routes/upload'));
+app.use('/api/notify', require('./routes/notify'));
+app.use('/api/watch', require('./routes/watchupdates'));
+app.use('/api/blog', require('./routes/comments'));
+app.use('/api', require('./routes/extras'));
 
 // 博客上传图片静态访问
 const uploadDir = path.join(__dirname, '..', 'uploads');
@@ -74,7 +86,7 @@ app.get('/sitemap.xml', async (req, res, next) => {
     const { pool } = require('./db');
     const [rows] = await pool.query('SELECT slug, updated_at FROM posts WHERE published = 1');
     const today = new Date().toISOString().slice(0, 10);
-    const locs = ['/', '/anime', '/watch', '/collection', '/blog', '/about']
+    const locs = ['/', '/anime', '/watch', '/collection', '/blog', '/about', '/stats']
       .map(p => '<url><loc>' + xmlEsc(config.publicBase + p) + '</loc><lastmod>' + today + '</lastmod></url>');
     for (const r of rows) {
       const mod = r.updated_at ? new Date(r.updated_at).toISOString().slice(0, 10) : today;
@@ -146,7 +158,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: '接口不存在', s
 app.use((err, req, res, next) => {
   const status = err.status || 500;
   if (status >= 500) {
-    console.error('[error]', err);
+    logger.error('[error]', { method: req.method, url: req.originalUrl, message: err.message, stack: String(err.stack || '').split('\n')[1] || '' });
     return res.status(500).json({ error: '服务器内部错误，请稍后再试', status: 500 });
   }
   res.status(status).json({ error: err.message || '请求错误', status });
@@ -155,18 +167,17 @@ app.use((err, req, res, next) => {
 (async () => {
   try {
     await initDb();
-    console.log('[db] schema ready');
+    logger.info('[db] schema ready');
   } catch (e) {
-    console.error('[db] init failed:', e.message);
+    logger.error('[db] init failed', { message: e.message });
   }
+  logger.cleanupOld();
   news.startScheduler();
   watch.startScheduler();
+  require('./updatepusher').start();
 
   library.startScheduler();
   app.listen(config.port, config.host, () => {
-    console.log(`[server] listening on ${config.port}`);
+    logger.info('[server] listening', { port: config.port, host: config.host, node: process.version });
   });
 })();
-
-
-

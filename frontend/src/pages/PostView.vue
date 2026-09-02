@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { NSpin, NTag, NAlert, NButton } from 'naive-ui';
 import { api, fmtDate } from '../api';
 import { useUserStore } from '../stores/user';
+import CommentSection from '../components/CommentSection.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -49,6 +50,7 @@ function goEdit() {
           <n-tag v-for="t in post.tags" :key="t" size="small" :bordered="false" type="info">{{ t }}</n-tag>
         </div>
         <div class="markdown-body" v-html="post.html"></div>
+        <CommentSection :slug="post.slug" />
       </article>
     </n-spin>
   </div>
