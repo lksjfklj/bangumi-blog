@@ -1,11 +1,13 @@
 // library.js - 本地内容库（漫画 / 轻小说 / Galgame·视觉小说）全量同步与查询
 // 数据源：Bangumi v0 API /v0/subjects 全量列表（rank 排序）
 //   书籍 type=1（含 platform/tags/meta_tags/rating）-> 漫画 / 轻小说
-//   游戏 type=4（platform 恒为「游戏」，需按社区标签判定）-> galgame（Galgame/视觉小说/乙女/百合向）
+//   游戏 type=4（platform 恒为「游戏」，需按社区标签判定）-> galgame（全年龄 + R18 统一收录）
 // 书籍分类规则：platform=漫画 -> 漫画；platform=小说 且 标签含「轻小说」 -> 轻小说
-// 游戏分类规则：meta_tags ∪ 用户 tags 命中强标记集合（见 GALGAME_MARKERS）-> galgame；
-//            系列名命中 GALGAME_NAME_PATTERNS（逆转裁判/兰斯等被标成 AVG/RPG 的名作）也收录；
-//            匿名 API 不可见的 R18 条目与无标签经典系列走 CURATED_GAME_IDS 定向补录（见 importCuratedGames）
+// 游戏分类规则：meta_tags ∪ 用户 tags 命中 GALGAME_MARKERS（Galgame/视觉小说/乙女/BL/GL…）
+//            或 EROGE_MARKERS（R18/18禁/eroge/黄油/エロゲー…）-> galgame；
+//            系列名命中 GALGAME_NAME_PATTERNS（逆转裁判/兰斯等被标成 AVG/RPG/SLG 的名作）也收录。
+//            注意：AVG/ADV 不单独作为白名单（bgm 里塞尔达/大镖客等主机欧美大作同样带 AVG 标签）。
+// 游戏同步带站长 Bangumi token 拉全量 rank 列表，R18(nsfw) 条目才可见；token 缺失时降级匿名抓取。
 // 地区规则：按每本书的用户标签判定；明确标注为非中日韩地区的条目标记 blocked=1 排除；
 //          未标注地区的条目保留（bgm 书籍库以中日韩为主），前端可用「地区」筛选只看已确认的中日韩。
 const { bgm, getValidToken } = require('./bangumi');
@@ -46,13 +48,22 @@ function classify(item) {
 }
 
 // 返回 'galgame' | null：bgm 游戏条目的 platform 恒为「游戏」，无法像书籍那样按平台划分，
-// 只能靠社区标签判定。meta_tags（官方/高权重标签）∪ 用户 tags 命中以下任一强标记即视为视觉小说向；
-// 想收紧/放宽收录范围时，直接调整这份集合即可。
+// 只能靠社区标签判定。meta_tags（官方/高权重标签）∪ 用户 tags 命中以下任一标记即视为 galgame：
+//   - GALGAME_MARKERS：强题材标记（全年龄 galgame / 视觉小说 / 乙女 / BL / GL…）
+//   - EROGE_MARKERS：成人向标记（R18 / 18禁 / eroge / 黄油…，bgm 的成人条目普遍会打这些标）
+//   - GALGAME_NAME_PATTERNS：社区标成 AVG/推理/RPG/SLG 而非 Galgame 的经典系列（见下）
+// 注意 AVG/ADV 不单独作为白名单：bgm 里塞尔达/大镖客等主机欧美大作同样带 AVG 标签，
+// 按词面无条件收录会把整库主机游戏灌进来。想收紧/放宽范围时直接调整下面几份集合。
 const GALGAME_MARKERS = [
-  'Galgame', 'galgame', 'GAL', '视觉小说', 'VN', '文字冒险',
-  '乙女', '乙女向', '乙女ゲー', '乙女ゲーム', 'BL', 'BLゲー', 'GL'
+  'Galgame', 'galgame', 'GAL', '视觉小说', 'VN', '文字冒险', '文字冒险游戏', '互动小说',
+  '乙女', '乙女向', '乙女ゲー', '乙女ゲーム', '乙女系', 'BL', 'BLゲー', 'BLゲーム', 'GL'
 ];
-// 部分经典系列被 bgm 社区标成 AVG/推理/RPG 而不是 Galgame（如逆转裁判、大逆转裁判、逆转检事），
+const EROGE_MARKERS = [
+  'R18', 'R-18', '18禁', '18X', '成人', '成人向', '成人游戏',
+  'eroge', 'Eroge', 'EROGE', 'エロゲ', 'エロゲー', 'アダルト', 'アダルトゲーム',
+  '黄油', '拔作', '抜きゲー', 'H-Game', 'Hgame', 'HGAME'
+];
+// 部分经典系列被 bgm 社区标成 AVG/推理/RPG/SLG 而不是 Galgame（如逆转裁判、逆转检事、兰斯），
 // 单靠标签会把整条系列漏掉：命中条目名特征（中文/日文/英文名任一）的也一并收录。
 const GALGAME_NAME_PATTERNS = [
   /逆[转轉]裁判|逆転裁判/,          // 逆转裁判 1-6 / 复苏的逆转 等全系列
@@ -67,15 +78,15 @@ const GALGAME_NAME_PATTERNS = [
 function classifyGame(item) {
   const names = tagNames(item);
   if (GALGAME_MARKERS.some(m => names.has(m))) return 'galgame';
+  if (EROGE_MARKERS.some(m => names.has(m))) return 'galgame';
   const text = [item && item.name, item && item.name_cn].filter(Boolean).join('\n');
   return GALGAME_NAME_PATTERNS.some(re => re.test(text)) ? 'galgame' : null;
 }
-// bgm 的 R18 条目对匿名 API 请求隐藏（detail 直接 404），所以兰斯正传这类经典
-// 即使带 Galgame 标签也不会被全量扫描入库；逆转裁判6/大逆/检事等则只被标成 AVG/推理。
-// 这里用站长 Bangumi token 按 subject_id 定向补录（兰斯正传 01/02/03/4.1/4.2/5D/6/战国兰斯/8/9/10/鬼畜王
-// + 逆转裁判主系列缺失项）。想再收某部作品时往数组里加 bgm subject id，下次游戏同步会自动刷新。
+// 游戏全量同步已改为带站长 token（R18 条目在列表里可见），此列表降级为“保险兜底”：
+// 仍可能漏收的经典/无标签条目（兰斯正传各代、逆转裁判主系列缺失项等）在此按 subject_id 定向补录，
+// 每次游戏同步结束自动刷新。想再收某部作品时往数组里加 bgm subject id 即可。
 const CURATED_GAME_IDS = [
-  // —— 兰斯系列（多为 R18，匿名不可见）——
+  // —— 兰斯系列（多为 R18，兜底补录）——
   75442,  // 兰斯1 -寻找小光-（1989 初代）
   80316,  // 兰斯01 寻找小光（重制）
   75508,  // 兰斯02 -反叛的少女们-（重制）
@@ -98,12 +109,20 @@ const CURATED_GAME_IDS = [
   18438   // 雷顿教授VS逆转裁判
 ];
 
+// 获取站长（owner）的有效 Bangumi token：查库 + 失效自动刷新；找不到/刷新失败返回 null
+async function getOwnerToken() {
+  let token = null;
+  try {
+    const [rows] = await pool.query('SELECT * FROM users WHERE is_owner = 1 AND access_token IS NOT NULL LIMIT 1');
+    if (rows && rows.length) token = await getValidToken(rows[0]);
+  } catch (e) { token = null; }
+  return token;
+}
+
 // 用站长 token 逐条拉取 CURATED_GAME_IDS 并 upsert；分类失败时按策展列表强制归入 galgame
 async function importCuratedGames() {
-  const [rows] = await pool.query('SELECT * FROM users WHERE is_owner = 1 AND access_token IS NOT NULL LIMIT 1');
-  if (!rows || !rows.length) return { ok: false, reason: '未找到站长 Bangumi token，跳过策展补录' };
-  const token = await getValidToken(rows[0]);
-  if (!token) return { ok: false, reason: '站长 Bangumi token 失效，跳过策展补录' };
+  const token = await getOwnerToken();
+  if (!token) return { ok: false, reason: '未获取到站长 Bangumi token，跳过策展补录' };
   const stmt = pool.getConnection();
   let added = 0;
   let failed = 0;
@@ -168,21 +187,23 @@ function toRow(category, item) {
 
 // 拉取指定类型条目全量（rank 排序，offset 分页，每页 50）
 // stopOnRangeEnd：游戏库 offset 越界时 v0 列表接口返回 HTTP 400，视为已到库底（正常结束）
-async function fetchByType(type, onBatch, { stopOnRangeEnd = false } = {}) {
+// token：传站长 Bangumi token 时列表请求带 Authorization（bgm 匿名请求隐藏 R18/nsfw 条目）
+async function fetchByType(type, onBatch, { stopOnRangeEnd = false, token = null } = {}) {
   const limit = 50;
   let offset = 0;
   let total = 0;
+  const auth = token ? { token } : {};
   for (;;) {
     let data;
     try {
-      data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`);
+      data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`, auth);
     } catch (e) {
       // 游戏库已拉到底（offset 越界返回 400）
       if (stopOnRangeEnd && e && e.status === 400) break;
       // 失败重试一次（网络/限流），仍失败则抛错终止本次同步
       await delay(600);
       try {
-        data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`);
+        data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`, auth);
       } catch (e2) {
         if (stopOnRangeEnd && e2 && e2.status === 400) break;
         throw e2;
@@ -200,7 +221,12 @@ async function fetchByType(type, onBatch, { stopOnRangeEnd = false } = {}) {
 }
 
 async function fetchAllBooks(onBatch) { return fetchByType(1, onBatch); }
-async function fetchAllGames(onBatch) { return fetchByType(4, onBatch, { stopOnRangeEnd: true }); }
+async function fetchAllGames(onBatch) {
+  // 带站长 token 拉取：bgm 对匿名请求隐藏 R18(nsfw) 条目，带 token 才能把全年龄+R18 完整扫进来
+  const token = await getOwnerToken();
+  if (!token) console.warn('[library] 未获取到站长 Bangumi token，本次游戏同步看不到 R18(nsfw) 条目');
+  return fetchByType(4, onBatch, { stopOnRangeEnd: true, token });
+}
 
 // 全量同步入库
 // 默认只同步书籍（type=1，历史行为，12h 定时器沿用）；游戏（type=4）全量拉取较重，

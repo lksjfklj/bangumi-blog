@@ -67,6 +67,28 @@ test('classifyGame: 与 classify 互不干扰（平台=游戏 不进书籍分类
   assert.equal(classify(mkGame(['Galgame'])), null);
 });
 
+test('classifyGame: 成人向标记（R18/18禁/eroge/黄油/エロゲー等）也收录', () => {
+  assert.equal(classifyGame(mkGame(['R18', 'RPG'], ['SLG'])), 'galgame');
+  assert.equal(classifyGame(mkGame(['R-18', 'AVG'], [])), 'galgame');
+  assert.equal(classifyGame(mkGame([], ['18禁'])), 'galgame');
+  assert.equal(classifyGame(mkGame([], ['eroge'])), 'galgame');
+  assert.equal(classifyGame(mkGame(['エロゲー'], ['恋爱'])), 'galgame');
+  assert.equal(classifyGame(mkGame(['黄油', 'HGAME'], [])), 'galgame');
+  assert.equal(classifyGame(mkGame([], ['抜きゲー'])), 'galgame');
+});
+test('classifyGame: 视觉小说向别名（文字冒险游戏/互动小说/VN/乙女系）', () => {
+  assert.equal(classifyGame(mkGame(['文字冒险游戏'], [])), 'galgame');
+  assert.equal(classifyGame(mkGame([], ['互动小说'])), 'galgame');
+  assert.equal(classifyGame(mkGame(['VN'], ['悬疑'])), 'galgame');
+  assert.equal(classifyGame(mkGame([], ['乙女系', '恋爱'])), 'galgame');
+});
+test('classifyGame: AVG/ADV 不单独收录（塞尔达/大镖客/法环等主机欧美大作）', () => {
+  assert.equal(classifyGame(mkGame(['AVG'], ['冒险'])), null);
+  assert.equal(classifyGame(mkGameNamed('ゼルダの伝説 ブレス オブ ザ ワイルド', '塞尔达传说 旷野之息', ['AVG', 'AAVG'], ['开放世界'])), null);
+  assert.equal(classifyGame(mkGameNamed('Red Dead Redemption 2', '荒野大镖客2', ['ADV', 'RPG'], ['开放世界'])), null);
+  assert.equal(classifyGame(mkGameNamed('ELDEN RING', '艾尔登法环', ['AVG', 'RPG'], [])), null);
+});
+
 test('regionsOf: 中日韩区域标签识别，无标签为空数组', () => {
   const r = regionsOf(mkBook('漫画', [], ['日本', '日常']));
   assert.deepEqual(r, ['日本']);
