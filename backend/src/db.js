@@ -275,6 +275,32 @@ CREATE TABLE IF NOT EXISTS library_extra (
     fn: () => {
       ensureColumn('library_subjects', 'ext', "ext TEXT DEFAULT '{}'");
     }
+  },
+  {
+    id: 6,
+    name: 'vndb-release-cal-v6',
+    sql: `
+CREATE TABLE IF NOT EXISTS vndb_release_calendar (
+  vndb_id TEXT PRIMARY KEY,
+  title TEXT DEFAULT '',
+  titles TEXT DEFAULT '[]',
+  released TEXT DEFAULT '',
+  olang TEXT DEFAULT '',
+  developers TEXT DEFAULT '[]',
+  platforms TEXT DEFAULT '[]',
+  image TEXT DEFAULT '',
+  rating REAL DEFAULT 0,
+  votecount INTEGER DEFAULT 0,
+  popularity REAL DEFAULT 0,
+  length INTEGER DEFAULT 0,
+  seen INTEGER DEFAULT 0,
+  created_at INTEGER DEFAULT 0,
+  updated_at INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_vndb_cal_rel ON vndb_release_calendar(released);
+CREATE INDEX IF NOT EXISTS idx_vndb_cal_olang ON vndb_release_calendar(olang, released);
+CREATE INDEX IF NOT EXISTS idx_vndb_cal_seen ON vndb_release_calendar(seen, released);
+`
   }
 ];
 

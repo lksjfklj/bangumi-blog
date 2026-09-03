@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { NInput, NSelect, NButton, NPagination, NSpin, NEmpty, NAlert } from 'naive-ui';
-import { api } from '../api';
+import { api, img } from '../api';
 import SubjectCard from '../components/SubjectCard.vue';
 
 const route = useRoute();
@@ -338,7 +338,44 @@ async function triggerSync() {
   }
 }
 
-onMounted(() => { readQuery(); loadLibStatus(); load(); });
+// Galgame 新作 · 发售日历（VNDB 增强源）：最近 30 天发售 + 未来 45 天定档，库内条目可跳站内详情
+const releaseCal = ref({ recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} });
+const calReady = ref(false);
+const calGroups = computed(() => {
+  const r = releaseCal.value;
+  const out = [];
+  if (r.recent && r.recent.length) out.push({ key: 'recent', icon: '🆕', label: '近期发售（近 30 天 · ' + (r.recentTotal || r.recent.length) + '）', items: r.recent });
+  if (r.upcoming && r.upcoming.length) out.push({ key: 'upcoming', icon: '📅', label: '即将发售（' + (r.upcomingTotal || r.upcoming.length) + '）', items: r.upcoming });
+  return out;
+});
+const relRunText = computed(() => {
+  const t = releaseCal.value.stats && releaseCal.value.stats.lastRunAt;
+  if (!t) return '';
+  return ' · 上次扫描 ' + String(t).replace('T', ' ').slice(0, 16);
+});
+function relItemTitle(it) {
+  const main = it.native || it.title || '';
+  return (it.romanized && it.romanized !== main ? main + ' · ' + it.romanized : main);
+}
+function onRelItemClick(it, e) {
+  if (!it.bgmId) return; // 无库内条目：交给浏览器开 VNDB
+  e.preventDefault();
+  router.push('/subject/' + it.bgmId);
+}
+async function loadReleaseCal() {
+  if (category.value !== 'galgame') { calReady.value = false; return; }
+  try {
+    calReady.value = false;
+    const d = await api.get('/anime/release-calendar?recentDays=30&upcomingDays=45&limit=18');
+    releaseCal.value = d || { recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} };
+  } catch (e) {
+    releaseCal.value = { recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} };
+  } finally {
+    calReady.value = true;
+  }
+}
+watch(category, (v) => { if (v === 'galgame') loadReleaseCal(); });
+onMounted(() => { readQuery(); loadLibStatus(); load(); loadReleaseCal(); });
 // 翻页/筛选通过 router.replace 更新 query（页面不再整页重挂载），监听 query 同步并重新加载
 watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 </script>
@@ -400,6 +437,40 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
     <div class="hot-row">
       <span class="muted">热门：</span>
       <span v-for="k in HOT" :key="k" class="hot-tag" @click="hot(k)">{{ k }}</span>
+    </div>
+
+    <!-- Galgame 新作 · 发售日历（VNDB 增强源：近期发售 + 未来定档） -->
+    <div v-if="category === 'galgame' && !keyword.trim() && calReady && calGroups.length" class="rel-cal" v-reveal>
+      <div class="rel-head">
+        <span class="rel-title">🎮 Galgame 新作 · 发售日历</span>
+        <span class="rel-src">数据源 VNDB · 日/中/韩原语<template v-if="relRunText">{{ relRunText }}</template></span>
+      </div>
+      <div v-for="g in calGroups" :key="g.key" class="rel-group">
+        <div class="rel-sub">{{ g.icon }} {{ g.label }}</div>
+        <div class="rel-row">
+          <a
+            v-for="it in g.items"
+            :key="g.key + '-' + it.vndbId"
+            class="rel-item"
+            :href="it.bgmId ? undefined : it.vndbUrl"
+            :target="it.bgmId ? undefined : '_blank'"
+            :rel="it.bgmId ? undefined : 'noopener'"
+            :title="relItemTitle(it)"
+            @click="onRelItemClick(it, $event)"
+          >
+            <img v-if="it.image" class="rel-cover" :src="img(it.image)" :alt="it.title" loading="lazy" decoding="async" @error="$event.target.style.display = 'none'" />
+            <div v-else class="rel-no-cover">{{ String(it.title || '?').slice(0, 1) }}</div>
+            <div class="rel-meta">
+              <div class="rel-name">{{ it.title }}</div>
+              <div class="rel-line">{{ it.dateText }}<template v-if="it.developers && it.developers.length"> · {{ it.developers[0] }}</template></div>
+              <div class="rel-badges">
+                <span class="rel-badge">{{ it.langLabel }}</span>
+                <span v-if="it.inLibrary" class="rel-badge lib">⭐ 库内</span>
+              </div>
+            </div>
+          </a>
+        </div>
+      </div>
     </div>
 
     <div class="result-info">
@@ -467,6 +538,28 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
   content-visibility: auto;
   contain-intrinsic-size: 300px;
 }
+/* Galgame 新作发售日历条（VNDB） */
+.rel-cal { margin: 14px 0 4px; padding: 14px 16px 8px; border-radius: 14px; background: var(--panel-grad); border: 1px solid var(--back-btn-border); }
+.rel-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.rel-title { font-weight: 700; color: var(--text); letter-spacing: 1px; font-size: 14px; }
+.rel-src { font-size: 12px; color: var(--text-dim); opacity: .85; }
+.rel-group { margin-top: 10px; }
+.rel-sub { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+.rel-row { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; scrollbar-width: thin; }
+.rel-item { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; width: 286px; max-width: 88%;
+  padding: 8px 10px; border-radius: 12px; background: var(--bg-card); border: 1px solid var(--border);
+  text-decoration: none; color: inherit; transition: all .16s; }
+.rel-item:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: var(--shadow); }
+.rel-cover { width: 50px; height: 68px; object-fit: cover; border-radius: 6px; flex: none; background: var(--cover-grad); }
+.rel-no-cover { width: 50px; height: 68px; border-radius: 6px; flex: none; display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 700; color: var(--accent); background: var(--cover-grad); }
+.rel-meta { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.rel-name { font-size: 13px; font-weight: 600; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rel-line { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rel-badges { display: flex; gap: 4px; margin-top: 1px; flex-wrap: wrap; }
+.rel-badge { font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 999px; background: var(--src-tag-bg); color: var(--src-tag-text); border: 1px solid var(--src-tag-border); }
+.rel-badge.lib { background: var(--tag-gold-bg); color: var(--tag-gold-text); border-color: var(--tag-gold-border); }
+
 @media (max-width: 720px) {
   .search-bar { flex-wrap: wrap; }
   .search-bar .n-input { width: 100% !important; }

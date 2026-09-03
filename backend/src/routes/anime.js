@@ -2,6 +2,8 @@
 const express = require('express');
 const { bgm, bgmWeb, cached } = require('../bangumi');
 const { queryLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
+const { requireOwner } = require('../auth');
+const releasecal = require('../releasecal');
 const { pool } = require('../db');
 const router = express.Router();
 
@@ -374,6 +376,28 @@ router.get('/browser', async (req, res, next) => {
     return res.json({ ...data, page, limit, totalPages, total, source: 'bgm' });
   } catch (e) { next(e); }
 });
+// ---------- Galgame 新作发售日历（VNDB 增强源：新作检测/近期发售/已定档） ----------
+// 数据由 releasecal 定时扫描写入 vndb_release_calendar；本组接口只读，供 Galgame tab 展示。
+router.get('/release-calendar', async (req, res, next) => {
+  try {
+    res.json(await releasecal.getCalendar({
+      recentDays: req.query.recentDays ? +req.query.recentDays : undefined,
+      upcomingDays: req.query.upcomingDays ? +req.query.upcomingDays : undefined,
+      limit: req.query.limit ? +req.query.limit : undefined
+    }));
+  } catch (e) { next(e); }
+});
+// 扫描器状态/进度（站长可见）
+router.get('/release-calendar/status', requireOwner, async (req, res, next) => {
+  try { res.json(await releasecal.getStatus()); } catch (e) { next(e); }
+});
+// 手动触发一轮扫描：digest=false 只回填不推送；缺省推送新作速报
+router.post('/release-calendar/scan', requireOwner, async (req, res, next) => {
+  try {
+    res.json(await releasecal.scanOnce({ digest: !(req.body && req.body.digest === false) }));
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
 
 
