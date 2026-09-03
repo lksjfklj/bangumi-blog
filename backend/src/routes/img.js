@@ -10,7 +10,7 @@ const router = express.Router();
 let dispatcher = null;
 if (config.bangumi.proxy) dispatcher = new ProxyAgent(config.bangumi.proxy);
 
-const ALLOWED_HOSTS = /(^|\.)(bgm\.tv|lain\.bgm\.tv)$/i;
+const ALLOWED_HOSTS = /(^|\.)(bgm\.tv|lain\.bgm\.tv|t\.vndb\.org|s\.vndb\.org)$/i;
 
 router.get('/', async (req, res) => {
   const u = req.query.u || req.query.url || '';

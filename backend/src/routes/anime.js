@@ -1,7 +1,7 @@
 // routes/anime.js - 番剧数据（日历/搜索/条目/章节/角色/制作人员/相关）
 const express = require('express');
 const { bgm, bgmWeb, cached } = require('../bangumi');
-const { queryLibrary, syncStatus, runSync } = require('../library');
+const { queryLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
 const { pool } = require('../db');
 const router = express.Router();
 
@@ -218,6 +218,28 @@ router.get('/library/status', async (req, res, next) => {
     next(e);
   }
 });
+// VNDB 元数据回填（galgame 增强源）状态/进度/人工复查清单
+router.get('/library/enrich/vndb/status', async (req, res, next) => {
+  try { res.json(await vndbStatus()); } catch (e) { next(e); }
+});
+// 手动触发 VNDB 元数据回填（幂等、可续跑）：
+//   dryRun=true 只试跑不写库（建议配 limit）；limit=N 处理够 N 个条目即暂停返回；
+//   force=true 无视 30 天宽限期强制重刷；不带参数则整轮后台续跑并立即返回。
+router.post('/library/enrich/vndb', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const limit = Math.min(Math.max(+(body.limit) || 0, 0), 5000);
+    const force = !!(body.force);
+    const dryRun = !!(body.dryRun);
+    if (dryRun || limit > 0) {
+      const result = await runVndbSync({ dryRun, limit: dryRun && !limit ? 200 : limit, force });
+      return res.json(result);
+    }
+    const started = kickVndbEnrich();
+    return res.json(started.ok ? { ok: true, started: true, message: 'VNDB 回填已在后台启动（幂等续跑，可随时再调）' } : started);
+  } catch (e) { next(e); }
+});
+
 router.post('/library/sync', async (req, res, next) => {
   try {
     // 可选 body: { types: [1] | [4] }：只同步书籍或只同步游戏；缺省则两类全量同步

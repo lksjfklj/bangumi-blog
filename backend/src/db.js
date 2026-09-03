@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS library_subjects (
   tags TEXT DEFAULT '[]',
   regions TEXT DEFAULT '[]',
   blocked INTEGER DEFAULT 0,
+  ext TEXT DEFAULT '{}',
   updated_at INTEGER DEFAULT 0,
   PRIMARY KEY (subject_id, category)
 );
@@ -233,6 +234,46 @@ CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id, status, id);
       ensureColumn('users', 'bio', "bio TEXT DEFAULT ''");
       ensureColumn('collections', 'subject_tags', 'subject_tags TEXT DEFAULT NULL');
       ensureColumn('collections', 'watched_at', 'watched_at INTEGER DEFAULT 0');
+    }
+  },
+  {
+    id: 5,
+    name: 'vndb-source-map-v5',
+    sql: `
+CREATE TABLE IF NOT EXISTS library_source_map (
+  bgm_id INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  source_id TEXT DEFAULT '',
+  status TEXT DEFAULT 'ok',
+  match_score REAL DEFAULT 0,
+  match_q TEXT DEFAULT '',
+  meta TEXT DEFAULT '{}',
+  checked_at INTEGER DEFAULT 0,
+  updated_at INTEGER DEFAULT 0,
+  PRIMARY KEY (bgm_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_lib_source_map_src ON library_source_map(source, source_id);
+CREATE INDEX IF NOT EXISTS idx_lib_source_map_stat ON library_source_map(source, status, checked_at);
+
+CREATE TABLE IF NOT EXISTS library_extra (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  category TEXT DEFAULT 'galgame',
+  title TEXT DEFAULT '',
+  title_alt TEXT DEFAULT '',
+  released TEXT DEFAULT '',
+  image TEXT DEFAULT '',
+  rating REAL DEFAULT 0,
+  votecount INTEGER DEFAULT 0,
+  meta TEXT DEFAULT '{}',
+  created_at INTEGER DEFAULT 0,
+  updated_at INTEGER DEFAULT 0,
+  UNIQUE (source, source_id)
+);
+`,
+    fn: () => {
+      ensureColumn('library_subjects', 'ext', "ext TEXT DEFAULT '{}'");
     }
   }
 ];

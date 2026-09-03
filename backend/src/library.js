@@ -11,6 +11,7 @@
 // 地区规则：按每本书的用户标签判定；明确标注为非中日韩地区的条目标记 blocked=1 排除；
 //          未标注地区的条目保留（bgm 书籍库以中日韩为主），前端可用「地区」筛选只看已确认的中日韩。
 const { bgm, getValidToken } = require('./bangumi');
+const vndb = require('./vndb');
 const { pool } = require('./db');
 
 // 允许地区（中，含香港台湾；日；韩）
@@ -316,6 +317,11 @@ async function runSync(options = {}) {
     if (doBooks) await setMeta('last_run', lastSync.at);       // 书籍 12h 周期基准
     if (doGames) await setMeta('last_run_games', lastSync.at); // 游戏 7 天周期基准
     await setMeta('counts', JSON.stringify(mergedCounts));
+    if (doGames) {
+      // 游戏同步完成后，后台启动 VNDB 元数据回填（幂等/游标续跑，不占用 bgm 同步锁）
+      const kr = kickVndbEnrich();
+      if (kr && kr.ok) console.log('[library] 游戏同步完成，VNDB galgame 回填已在后台启动');
+    }
     return { ok: true, counts: mergedCounts, elapsedMs: Date.now() - started };
   } catch (e) {
     lastSync = { ok: false, at: new Date().toISOString(), error: e.message };
@@ -360,6 +366,260 @@ async function getMeta(key) {
   } catch (e) { return ''; }
 }
 
+// ============================================================
+// VNDB 元数据回填（galgame 增强源，表结构见 vndb-source-map-v5 迁移）
+// 底库仍是 Bangumi；VNDB 只负责给库内 galgame 条目补全/校准：别名、开发商、发行日期、
+// VNDB 评分/热度、封面、平台、时长等 ext.vndb 结构字段，并落 library_source_map 映射
+// （bgm subject_id <-> vndb id），为后续跨源补缺/新作同步管道打底。
+// 匹配策略：按 日文原名 -> 中文译名 的顺序搜 VNDB，跨语言对照候选标题族
+// （title/alttitle/titles 各语言/aliases）取相似度最高者；「年份一致 + 相似度」双层闸门
+// 判定可信后才入库。存疑（高相似但年份冲突等）记 review 并留 top 候选供人工复查，
+// 确定性无命中记 nomatch；两者 30 天内不重复打 API。整轮游标续跑（vndb_cursor），
+// 进程重启不丢进度；VNDB 匿名限速约 1 req/s，全量跑较慢，统一走后台 kickVndbEnrich。
+// ============================================================
+const VNDB_SOURCE = 'vndb';
+const VNDB_SCAN_BATCH = 30;          // 每批从库内拉取多少条候选
+const VNDB_MATCH_REFRESH_DAYS = 30;  // 已匹配条目间隔多少天按 vndb id 精确刷新一次
+const VNDB_RETRY_DAYS = 30;          // nomatch/review 条目多少天后允许重试
+let vndbBusy = false;                // VNDB 回填锁（与 bgm syncing 锁独立，避免长任务占住同步状态）
+let vndbLast = null;                 // 进程内最近一轮回填结果快照
+
+// 把 VNDB 摘要写入条目 ext 的 vndb 键：保留其他来源字段（mangaupdates 等未来扩展），仅整体覆盖 ext.vndb
+function mergeExt(extJson, vndbObj) {
+  let ext = {};
+  if (extJson) {
+    try {
+      const parsed = JSON.parse(extJson);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ext = parsed;
+    } catch (e) { ext = {}; }
+  }
+  ext.vndb = vndbObj;
+  return JSON.stringify(ext);
+}
+
+async function getVndbMap(bgmId) {
+  const [rows] = await pool.query(
+    'SELECT * FROM library_source_map WHERE bgm_id = ? AND source = ?', [bgmId, VNDB_SOURCE]);
+  return rows && rows.length ? rows[0] : null;
+}
+
+async function upsertVndbMap(bgmId, fields) {
+  const now = fields.checkedAt || Date.now();
+  await pool.query(
+    `INSERT INTO library_source_map (bgm_id, source, source_id, status, match_score, match_q, meta, checked_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(bgm_id, source) DO UPDATE SET
+       source_id = excluded.source_id, status = excluded.status, match_score = excluded.match_score,
+       match_q = excluded.match_q, meta = excluded.meta, checked_at = excluded.checked_at,
+       updated_at = excluded.updated_at`,
+    [bgmId, VNDB_SOURCE, fields.sourceId || '', fields.status || 'ok', fields.score || 0,
+     fields.q || '', JSON.stringify(fields.meta || {}), now, now]
+  );
+}
+
+async function setVndbExt(bgmId, extJson) {
+  await pool.query(
+    "UPDATE library_subjects SET ext = ? WHERE subject_id = ? AND category = 'galgame'",
+    [extJson, bgmId]
+  );
+}
+
+// 单条目回填：返回 { action, id, ... }，action ∈ ok/refresh/nomatch/review/skip/error
+async function enrichVndbRow(row, { force = false, dryRun = false } = {}) {
+  const id = row.id;
+  const year = String(row.air_date || '').slice(0, 4);
+  const names = [];
+  if (row.name) names.push(row.name);
+  if (row.name_cn && row.name_cn !== row.name) names.push(row.name_cn);
+
+  const existing = await getVndbMap(id);
+  const now = Date.now();
+  const days = (now - (Number(existing && existing.checked_at) || 0)) / 86400000;
+
+  // 已处理过且在宽限期内：跳过（已匹配 30 天内不重复刷；未命中 30 天内不重复打 API）
+  if (existing && !force && days < (existing.status === 'ok' ? VNDB_MATCH_REFRESH_DAYS : VNDB_RETRY_DAYS)) {
+    return { action: 'skip', id };
+  }
+
+  // 已匹配但到期：按 vndb id 精确拉取刷新（不重新做模糊匹配，省一次搜索）
+  if (existing && existing.status === 'ok' && existing.source_id && !force) {
+    let vn = null;
+    try { vn = await vndb.vnById(existing.source_id); }
+    catch (e) { return { action: 'error', id, error: e.message }; }
+    if (vn) {
+      if (!dryRun) {
+        await upsertVndbMap(id, {
+          sourceId: existing.source_id, status: 'ok', score: Number(existing.match_score) || 0,
+          q: existing.match_q || '', meta: { refreshed: 1, title: vn.title || '' }, checkedAt: now
+        });
+        await setVndbExt(id, mergeExt(row.ext, vndb.summarizeVn(vn)));
+      }
+      return { action: 'refresh', id, vndbId: existing.source_id, title: vn.title || '' };
+    }
+    // id 拉取落空（条目被删/权限变更）：回退走一次模糊搜索重新判定
+  }
+
+  // 搜索匹配：按 日文原名 -> 中文译名 顺序试，任一查询判定可信即收
+  const queries = names.length ? names : [String(row.name || row.name_cn || '')];
+  let pick = null;
+  let lastQ = '';
+  for (const q of queries) {
+    if (!q) continue;
+    if (!vndb.normalizeTitle(q)) continue;
+    lastQ = q;
+    let results = [];
+    try { results = await vndb.vnSearch(q, { limit: 8 }); }
+    catch (e) { return { action: 'error', id, error: e.message }; }
+    if (!results || !results.length) continue;
+    pick = vndb.pickBestVn(results, { names, year });
+    if (pick && vndb.matchDecision(pick).ok) break;
+  }
+  const decision = vndb.matchDecision(pick);
+
+  if (decision && decision.ok && pick && pick.vn) {
+    const summary = vndb.summarizeVn(pick.vn);
+    if (!dryRun) {
+      await upsertVndbMap(id, {
+        sourceId: pick.vn.id, status: 'ok', score: pick.score, q: lastQ,
+        meta: { title: pick.vn.title || '', matchedName: pick.matchedName || '', yearOk: pick.yearOk, reason: decision.reason },
+        checkedAt: now
+      });
+      await setVndbExt(id, mergeExt(row.ext, summary));
+    }
+    return { action: 'ok', id, vndbId: pick.vn.id, title: pick.vn.title || '', score: pick.score, matchedName: pick.matchedName || '' };
+  }
+
+  // 没有可信命中：接近但存疑记 review（meta 留 top 候选供人工复查），其余记 nomatch
+  const status = pick && pick.vn ? 'review' : 'nomatch';
+  const top = pick && pick.vn
+    ? { id: pick.vn.id, title: pick.vn.title || '', score: pick.score, reason: decision ? decision.reason : '', yearOk: pick.yearOk }
+    : null;
+  if (!dryRun) {
+    await upsertVndbMap(id, {
+      sourceId: '', status, score: pick ? pick.score : 0, q: lastQ,
+      meta: top ? { top } : { reason: decision ? decision.reason : 'no-result' }, checkedAt: now
+    });
+  }
+  return top ? { action: status, id, candidate: top } : { action: status, id };
+}
+
+// 跑一轮 VNDB 回填（幂等、可续跑）。游标 vndb_cursor 存最后处理到的 subject_id，
+// 一轮扫到底归零并记 vndb_last_run；limit>0 时处理够 limit 个即暂停（status=paused）。
+async function runVndbSync({ force = false, dryRun = false, limit = 0 } = {}) {
+  if (vndbBusy) return { ok: false, reason: 'already running' };
+  vndbBusy = true;
+  const started = Date.now();
+  const stats = { processed: 0, ok: 0, refresh: 0, nomatch: 0, review: 0, skip: 0, error: 0 };
+  try {
+    await setMeta('vndb_status', 'running');
+    let cursor = Number(await getMeta('vndb_cursor')) || 0;
+    let done = false;
+    let paused = false;
+    for (;;) {
+      const [rows] = await pool.query(
+        `SELECT subject_id AS id, name, name_cn, air_date, ext FROM library_subjects
+         WHERE category = 'galgame' AND blocked = 0 AND subject_id > ?
+         ORDER BY subject_id ASC LIMIT ?`,
+        [cursor, VNDB_SCAN_BATCH]
+      );
+      if (!rows || !rows.length) { done = true; break; }
+      for (const row of rows) {
+        let r;
+        try { r = await enrichVndbRow(row, { force, dryRun }); }
+        catch (e) { r = { action: 'error', id: row.id, error: e.message }; }
+        stats.processed++;
+        if (r.action === 'ok') stats.ok++;
+        else if (r.action === 'refresh') stats.refresh++;
+        else if (r.action === 'nomatch') stats.nomatch++;
+        else if (r.action === 'review') stats.review++;
+        else if (r.action === 'skip') stats.skip++;
+        else stats.error++;
+        cursor = row.id;
+        if (limit && stats.processed >= limit) { paused = true; break; }
+      }
+      await setMeta('vndb_cursor', String(cursor));
+      await setMeta('vndb_stats', JSON.stringify(stats));
+      if (paused) break;
+    }
+    if (done) await setMeta('vndb_cursor', '0');
+    await setMeta('vndb_status', done ? 'done' : 'paused');
+    if (done) {
+      const at = new Date().toISOString();
+      await setMeta('vndb_last_run', at);
+      vndbLast = { at, stats };
+    }
+    return { ok: true, done, paused, stats, elapsedMs: Date.now() - started };
+  } catch (e) {
+    await setMeta('vndb_status', 'error');
+    await setMeta('vndb_last_error', String(e.message || e).slice(0, 500));
+    return { ok: false, error: e.message };
+  } finally {
+    vndbBusy = false;
+  }
+}
+
+// 后台启动一轮回填（不占用 bgm syncing 锁；重复触发幂等/续跑）
+function kickVndbEnrich(opts) {
+  if (vndbBusy) return { ok: false, reason: 'already running' };
+  runVndbSync(opts || {})
+    .then((r) => {
+      if (r && r.ok) {
+        console.log('[library] VNDB 回填' + (r.done ? '整轮完成' : '已暂停续跑') + ' processed=' + r.stats.processed, JSON.stringify(r.stats));
+      } else if (r && r.error) {
+        console.error('[library] VNDB 回填失败:', r.error);
+      }
+    })
+    .catch((e) => console.error('[library] VNDB 回填异常:', e.message));
+  return { ok: true, started: true };
+}
+
+// VNDB 回填状态/进度/人工复查清单（供状态接口与 admin 排查）
+async function vndbStatus() {
+  const out = {
+    source: VNDB_SOURCE,
+    busy: vndbBusy,
+    lastRun: (await getMeta('vndb_last_run')) || null,
+    status: (await getMeta('vndb_status')) || 'idle',
+    cursor: Number(await getMeta('vndb_cursor')) || 0,
+    lastError: (await getMeta('vndb_last_error')) || null,
+    stats: null,
+    summary: null,
+    recent: []
+  };
+  try { out.stats = JSON.parse((await getMeta('vndb_stats')) || 'null'); } catch (e) { out.stats = null; }
+  try {
+    const [totals] = await pool.query("SELECT COUNT(*) AS n FROM library_subjects WHERE category = 'galgame' AND blocked = 0");
+    out.summary = { candidates: Number((totals[0] && totals[0].n) || 0), matched: 0, nomatch: 0, review: 0, untouched: 0, enriched: 0 };
+    const KEYMAP = { ok: 'matched', nomatch: 'nomatch', review: 'review' };
+    const [grp] = await pool.query('SELECT status, COUNT(*) AS n FROM library_source_map WHERE source = ? GROUP BY status', [VNDB_SOURCE]);
+    let mapped = 0;
+    for (const r of grp || []) {
+      const n = Number(r.n) || 0;
+      mapped += n;
+      if (KEYMAP[r.status]) out.summary[KEYMAP[r.status]] = n;
+    }
+    out.summary.untouched = Math.max(0, out.summary.candidates - mapped);
+    const [extRows] = await pool.query(
+      "SELECT COUNT(*) AS n FROM library_subjects WHERE category = 'galgame' AND blocked = 0 AND ext IS NOT NULL AND ext != '' AND ext != '{}'");
+    out.summary.enriched = Number((extRows[0] && extRows[0].n) || 0);
+    const [recent] = await pool.query(
+      `SELECT m.bgm_id, m.source_id, m.status, m.match_score, m.match_q, m.meta, m.checked_at,
+              COALESCE(s.name, '') AS name, COALESCE(s.name_cn, '') AS name_cn, COALESCE(s.image, '') AS image
+       FROM library_source_map m
+       LEFT JOIN library_subjects s ON s.subject_id = m.bgm_id AND s.category = 'galgame'
+       WHERE m.source = ? ORDER BY m.updated_at DESC LIMIT 20`, [VNDB_SOURCE]);
+    out.recent = (recent || []).map((r) => {
+      let meta = {};
+      try { meta = JSON.parse(r.meta || '{}'); } catch (e) {}
+      return {
+        bgmId: r.bgm_id, vndbId: r.source_id, status: r.status, score: r.match_score, q: r.match_q,
+        name: r.name_cn || r.name || '', image: r.image || '', checkedAt: r.checked_at, meta
+      };
+    });
+  } catch (e) { /* 状态查询失败不阻塞主流程 */ }
+  return out;
+}
+
 // 定时同步：书籍每 12h（库为空则立即）；Galgame 库为空或距上次游戏同步超过 7 天时单独同步
 async function ensureSync() {
   if (syncing) return;
@@ -378,6 +638,8 @@ async function ensureSync() {
     if (!gRows[0].n || gamesStale) {
       await runSync({ types: [4] });
     }
+    // 存量 galgame 从未做过 VNDB 回填（老库部署/手工补库后），后台补一轮
+    if (!(await getMeta('vndb_last_run'))) kickVndbEnrich();
   } catch (e) { console.error('[library] ensureSync fail:', e.message); }
 }
 
@@ -477,4 +739,4 @@ async function getStatus() {
   };
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus };
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus, runVndbSync, vndbStatus, kickVndbEnrich, mergeExt };
