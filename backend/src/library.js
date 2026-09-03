@@ -75,11 +75,44 @@ const GALGAME_NAME_PATTERNS = [
   /^戦国ランス/,                    // 战国兰斯（含 FD）
   /\bRance\b/i                      // 英文名（Rance 1/Quest/9/10…）
 ];
+// 一些 bgm 用户会给纯主机/欧美向大作打「Galgame / 视觉小说 / 乙女 / R18」等玩笑标签
+//（实测：最终幻想 X-2、密特罗德 融合、十字军之王3 等都被打成过 Galgame），
+// 若放任不管会把方案A明确排除的塞尔达/FF/博德之门/任天堂全家桶等灌进 galgame tab。
+// 命中以下条目名特征的主机/欧美主流系列直接排除（想再加系列时往这里补正则即可）。
+const GALGAME_EXCLUDE_PATTERNS = [
+  /塞尔达|ゼルダ|Zelda/i,                       // 塞尔达传说
+  /密特罗德|银河战士|Metroid/i,                 // 密特罗德/银河战士
+  /最终幻想|ファイナルファンタジー|Final Fantasy/i, // 最终幻想（含 X-2/纷争NT 等）
+  /博德之门|柏德之门|Baldur'?s Gate|Baldurs Gate/i, // 博德之门
+  /马里奥|马力欧|マリオ|Mario/i,                 // 马里奥
+  /宝可梦|口袋妖怪|宠物小精灵|Pok[ée]mon/i,      // 宝可梦
+  /异度之刃|异度神剑|ゼノブレイド|Xenoblade/i,   // 异度神剑
+  /火焰之纹章|ファイアーエムブレム|Fire Emblem/i, // 火焰之纹章
+  /星之卡比|卡比|Kirby/i,                        // 星之卡比
+  /动物森友会|动物之森|Animal Crossing/i,        // 动物森友会
+  /斯普拉遁|喷射战士|Splatoon/i,                 // 斯普拉遁
+  /大乱斗|Smash Bros/i,                          // 任天堂明星大乱斗
+  /艾尔登法环|エルデンリング|Elden Ring/i,       // 艾尔登法环
+  /黑暗之魂|Dark Souls|血源|Bloodborne|只狼|Sekiro|恶魔之魂|Demon'?s Souls/i, // FromSoftware 魂系
+  /荒野大镖客|Red Dead/i,                        // 荒野大镖客
+  /侠盗猎车手|Grand Theft Auto|GTA/i,            // GTA
+  /巫师|Witcher|上古卷轴|Elder Scrolls|天际|Skyrim|辐射|Fallout/i, // 欧美 ARPG 名作
+  /赛博朋克2077|Cyberpunk 2077/i,                // 赛博朋克2077
+  /使命召唤|Call of Duty|战地|Battlefield|光环|Halo/i, // 欧美 FPS
+  /战神|God of War|刺客信条|Assassin'?s Creed/i, // 战神/刺客信条
+  /怪物猎人|Monster Hunter|生化危机|Resident Evil|Biohazard|合金装备|Metal Gear/i, // 日系主机名作
+  /十字军之王|Crusader Kings/i,                                      // 十字军之王（Paradox 大战略，被 bgm 用户打过 Galgame 玩笑标签）
+  /千年战争|千年戦争/i,                                              // 千年战争Aigis（DMM 塔防手游，用户标签误带 R18）
+  /偶像大师|偶像大師|アイドルマスター|THE iDOLM@STER|Idolmaster/i,    // 偶像大师（偶像育成，被用户打 GAL 玩笑标签）
+  /P4U|Persona 4 Arena|アルティマックス|Ultimax/i                   // P4U2（女神异闻录4 格斗衍生作，被用户打视觉小说标签）
+];
 function classifyGame(item) {
+  const text = [item && item.name, item && item.name_cn].filter(Boolean).join('\n');
+  // 主机/欧美主流系列的玩笑标签（bgm 用户常给塞尔达/FF 等打 Galgame 标签）不进库
+  if (GALGAME_EXCLUDE_PATTERNS.some(re => re.test(text))) return null;
   const names = tagNames(item);
   if (GALGAME_MARKERS.some(m => names.has(m))) return 'galgame';
   if (EROGE_MARKERS.some(m => names.has(m))) return 'galgame';
-  const text = [item && item.name, item && item.name_cn].filter(Boolean).join('\n');
   return GALGAME_NAME_PATTERNS.some(re => re.test(text)) ? 'galgame' : null;
 }
 // 游戏全量同步已改为带站长 token（R18 条目在列表里可见），此列表降级为“保险兜底”：

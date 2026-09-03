@@ -88,6 +88,19 @@ test('classifyGame: AVG/ADV 不单独收录（塞尔达/大镖客/法环等主�
   assert.equal(classifyGame(mkGameNamed('Red Dead Redemption 2', '荒野大镖客2', ['ADV', 'RPG'], ['开放世界'])), null);
   assert.equal(classifyGame(mkGameNamed('ELDEN RING', '艾尔登法环', ['AVG', 'RPG'], [])), null);
 });
+test('classifyGame: 主机/欧美大作带 Galgame/R18 玩笑标签仍排除（防灌库）', () => {
+  assert.equal(classifyGame(mkGameNamed('ゼルダの伝説 時のオカリナ', '塞尔达传说 时之笛', ['RPG'], ['Galgame'])), null);
+  assert.equal(classifyGame(mkGameNamed('メトロイド フュージョン', '密特罗德 融合', ['ACT'], ['Galgame', '非gal'])), null);
+  assert.equal(classifyGame(mkGameNamed('ファイナルファンタジーX-2', '最终幻想 X-2', ['RPG'], ['Galgame'])), null);
+  assert.equal(classifyGame(mkGameNamed('Crusader Kings III', '十字军之王3', ['SLG'], ['R18'])), null);
+  assert.equal(classifyGame(mkGameNamed('ファイアーエムブレム if', '火焰之纹章if', ['SLG'], ['乙女向'])), null);
+  assert.equal(classifyGame(mkGameNamed('ELDEN RING', '艾尔登法环', ['RPG'], ['视觉小说'])), null);
+  assert.equal(classifyGame(mkGameNamed('Super Mario Odyssey', '超级马力欧 奥德赛', ['ACT'], ['Galgame'])), null);
+  assert.equal(classifyGame(mkGameNamed('千年戦争アイギス', '千年战争Aigis', ['SLG'], ['R18'])), null);
+  assert.equal(classifyGame(mkGameNamed('ペルソナ4 ジ・アルティマックス', '女神异闻录4 无敌究极背桥摔', ['FTG'], ['视觉小说'])), null);
+  assert.equal(classifyGame(mkGameNamed('THE IDOLM@STER SP', '偶像大师 SP', ['SLG'], ['GAL'])), null);
+});
+
 
 test('regionsOf: 中日韩区域标签识别，无标签为空数组', () => {
   const r = regionsOf(mkBook('漫画', [], ['日本', '日常']));
