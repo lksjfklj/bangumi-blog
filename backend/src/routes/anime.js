@@ -7,6 +7,19 @@ const router = express.Router();
 
 const SUBJECT_TYPES = { 1: 'book', 2: 'anime', 3: 'music', 4: 'game', 6: 'real' };
 
+// 读取本地 galgame 库已回填的 VNDB 摘要（无匹配/未回填/被封禁返回 null），供条目详情页展示增强数据
+async function localVndbExt(subjectId) {
+  try {
+    const [rows] = await pool.query(
+      "SELECT ext FROM library_subjects WHERE subject_id = ? AND category = 'galgame' AND blocked = 0",
+      [subjectId]
+    );
+    if (!rows || !rows.length) return null;
+    const v = JSON.parse(rows[0].ext || '{}').vndb;
+    return v && v.id ? v : null;
+  } catch (e) { return null; }
+}
+
 // 本周放送日历（Bangumi 旧版 /calendar 接口，含 7 天）
 router.get('/calendar', async (req, res, next) => {
   try {
@@ -83,6 +96,8 @@ router.get('/subjects/:id', async (req, res, next) => {
   try {
     const id = +req.params.id;
     const data = await cached('bgm:subject:' + id, 24 * 3600 * 1000, () => bgm('/v0/subjects/' + id));
+    // 详情页增强：附上 VNDB 已回填的结构化元数据（开发商/发行日/评分/封面等），无匹配则为 null
+    if (data && typeof data === 'object') data.vndb = await localVndbExt(id);
     res.json(data);
   } catch (e) { next(e); }
 });

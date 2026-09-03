@@ -44,6 +44,22 @@ const coverFailed = ref(false);
 const charFailed = {};
 const colLoading = ref(true);
 
+// VNDB 增强数据（条目详情接口附带本地 galgame 库已回填的 ext.vndb，无匹配为 null）
+const vndb = computed(() => subject.value?.vndb || null);
+const VNDB_LENGTH = { 1: '很短', 2: '较短', 3: '中等', 4: '较长', 5: '很长' };
+const VNDB_PLATFORMS = {
+  win: 'Windows', linux: 'Linux', mac: 'macOS', ios: 'iOS', android: 'Android', web: 'Web',
+  psp: 'PSP', psvita: 'PS Vita', 'ps1': 'PS1', 'ps2': 'PS2', 'ps3': 'PS3', 'ps4': 'PS4', 'ps5': 'PS5',
+  xbox: 'Xbox', xbox360: 'Xbox 360', xboxone: 'Xbox One', xboxsx: 'Xbox Series X/S', switch: 'Switch',
+  nds: 'NDS', '3ds': '3DS', gba: 'GBA', sfc: 'SFC', nes: 'FC/NES', ss: 'SS', dc: 'Dreamcast',
+  pce: 'PCE', pc98: 'PC-98', dvd: 'DVD', bdp: '蓝光', flash: 'Flash', mobile: '手机'
+};
+const VNDB_LANGS = { ja: '日语', zh: '中文', en: '英语', ko: '韩语', ru: '俄语', fr: '法语', de: '德语', es: '西班牙语', it: '意大利语', pt: '葡萄牙语' };
+function vndbPlatformLabel(p) { return VNDB_PLATFORMS[p] || String(p || '').toUpperCase(); }
+function vndbLengthLabel(n) { return VNDB_LENGTH[n] || (n ? String(n) : ''); }
+function vndbLangLabel(l) { return VNDB_LANGS[l] || String(l || '').toUpperCase(); }
+function vndbScore(n) { const x = Number(n); return x ? x.toFixed(1) : '—'; }
+
 // 收藏编辑
 const editing = ref(false);
 const editForm = ref({ status: 1, score: 0, ep_status: 0, comment: '' });
@@ -292,6 +308,34 @@ watch(subject, (sVal) => {
           </div>
 
           <div class="right">
+            <div v-if="vndb" class="block">
+              <div class="block-title">
+                VNDB 增强数据
+                <a class="vndb-link" :href="'https://vndb.org/v' + vndb.id" target="_blank" rel="noopener">v{{ vndb.id }} ↗</a>
+              </div>
+              <div class="vndb-head">
+                <img v-if="vndb.image" class="vndb-cover" :src="img(vndb.image)" alt="VNDB 封面" loading="lazy" @error="$event.target.style.display='none'" />
+                <div v-else class="vndb-cover vndb-noimg">🎮</div>
+                <div class="vndb-summary">
+                  <div class="vndb-score-line">
+                    <span class="vndb-score">{{ vndbScore(vndb.rating) }}</span>
+                    <span class="muted">{{ vndb.votecount || 0 }} 人投票</span>
+                  </div>
+                  <div class="muted" style="font-size:12px">热度 {{ vndb.popularity || 0 }}</div>
+                  <div v-if="vndb.title && vndb.title !== subject.name && vndb.title !== subject.name_cn" class="vndb-vntitle">{{ vndb.title }}</div>
+                </div>
+              </div>
+              <table class="info-table">
+                <tr v-if="vndb.developers && vndb.developers.length"><td class="k">开发商</td><td class="v">{{ vndb.developers.join('、') }}</td></tr>
+                <tr v-if="vndb.released"><td class="k">发行日</td><td class="v">{{ vndb.released }}</td></tr>
+                <tr v-if="vndb.olang"><td class="k">语言</td><td class="v">{{ vndbLangLabel(vndb.olang) }}</td></tr>
+                <tr v-if="vndb.length"><td class="k">时长</td><td class="v">{{ vndbLengthLabel(vndb.length) }}</td></tr>
+                <tr v-if="vndb.platforms && vndb.platforms.length"><td class="k">平台</td><td class="v">{{ vndb.platforms.map(vndbPlatformLabel).join(' / ') }}</td></tr>
+              </table>
+              <div v-if="vndb.aliases && vndb.aliases.length" class="vndb-aliases" :title="vndb.aliases.join('、')">
+                别名：{{ vndb.aliases.slice(0, 6).join('、') }}<span v-if="vndb.aliases.length > 6">…</span>
+              </div>
+            </div>
             <div v-if="related.length" class="block">
               <div class="block-title">相关条目</div>
               <div class="related-list">
@@ -377,6 +421,17 @@ watch(subject, (sVal) => {
 .related-list :deep(.cover) { width: 64px; aspect-ratio: auto; height: 86px; flex-shrink: 0; }
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
+.vndb-link { float: right; font-size: 12px; color: var(--accent); text-decoration: none; opacity: .9; }
+.vndb-link:hover { text-decoration: underline; opacity: 1; }
+.vndb-head { display: flex; gap: 12px; align-items: flex-start; margin: 4px 0 10px; }
+.vndb-cover { width: 82px; height: 116px; object-fit: cover; border-radius: 8px; background: var(--cover-grad); flex-shrink: 0; box-shadow: var(--shadow); }
+.vndb-noimg { display: flex; align-items: center; justify-content: center; font-size: 30px; color: var(--accent); }
+.vndb-summary { flex: 1; min-width: 0; }
+.vndb-score-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.vndb-score { font-size: 24px; font-weight: 800; color: var(--accent); line-height: 1.15; }
+.vndb-vntitle { margin-top: 8px; font-size: 12px; color: var(--text-dim); word-break: break-all; }
+.info-table td.v { word-break: break-word; }
+.vndb-aliases { margin-top: 8px; font-size: 11px; color: var(--text-dim); line-height: 1.6; word-break: break-all; }
 @media (max-width: 900px) {
   .detail-head { flex-direction: column; }
   .detail-head .cover { width: 160px; }
