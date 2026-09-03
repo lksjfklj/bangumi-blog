@@ -3,10 +3,12 @@
 //   书籍 type=1（含 platform/tags/meta_tags/rating）-> 漫画 / 轻小说
 //   游戏 type=4（platform 恒为「游戏」，需按社区标签判定）-> galgame（Galgame/视觉小说/乙女/百合向）
 // 书籍分类规则：platform=漫画 -> 漫画；platform=小说 且 标签含「轻小说」 -> 轻小说
-// 游戏分类规则：meta_tags ∪ 用户 tags 命中强标记集合（见 GALGAME_MARKERS）-> galgame
+// 游戏分类规则：meta_tags ∪ 用户 tags 命中强标记集合（见 GALGAME_MARKERS）-> galgame；
+//            系列名命中 GALGAME_NAME_PATTERNS（逆转裁判/兰斯等被标成 AVG/RPG 的名作）也收录；
+//            匿名 API 不可见的 R18 条目与无标签经典系列走 CURATED_GAME_IDS 定向补录（见 importCuratedGames）
 // 地区规则：按每本书的用户标签判定；明确标注为非中日韩地区的条目标记 blocked=1 排除；
 //          未标注地区的条目保留（bgm 书籍库以中日韩为主），前端可用「地区」筛选只看已确认的中日韩。
-const { bgm } = require('./bangumi');
+const { bgm, getValidToken } = require('./bangumi');
 const { pool } = require('./db');
 
 // 允许地区（中，含香港台湾；日；韩）
@@ -50,9 +52,90 @@ const GALGAME_MARKERS = [
   'Galgame', 'galgame', 'GAL', '视觉小说', 'VN', '文字冒险',
   '乙女', '乙女向', '乙女ゲー', '乙女ゲーム', 'BL', 'BLゲー', 'GL'
 ];
+// 部分经典系列被 bgm 社区标成 AVG/推理/RPG 而不是 Galgame（如逆转裁判、大逆转裁判、逆转检事），
+// 单靠标签会把整条系列漏掉：命中条目名特征（中文/日文/英文名任一）的也一并收录。
+const GALGAME_NAME_PATTERNS = [
+  /逆[转轉]裁判|逆転裁判/,          // 逆转裁判 1-6 / 复苏的逆转 等全系列
+  /Ace Attorney/i,                  // 英文标题
+  /逆[转轉]检事|逆転検事/,          // 逆转检事 1/2
+  /雷顿教授VS逆转裁判|レイトン教授VS逆転裁判/, // 雷逆（联动作品）
+  /^兰斯|^ランス/,                  // 兰斯主系列（兰斯10/兰斯6后日谈…）
+  /^鬼畜王兰斯|^鬼畜王ランス/,      // 鬼畜王兰斯
+  /^戦国ランス/,                    // 战国兰斯（含 FD）
+  /\bRance\b/i                      // 英文名（Rance 1/Quest/9/10…）
+];
 function classifyGame(item) {
   const names = tagNames(item);
-  return GALGAME_MARKERS.some(m => names.has(m)) ? 'galgame' : null;
+  if (GALGAME_MARKERS.some(m => names.has(m))) return 'galgame';
+  const text = [item && item.name, item && item.name_cn].filter(Boolean).join('\n');
+  return GALGAME_NAME_PATTERNS.some(re => re.test(text)) ? 'galgame' : null;
+}
+// bgm 的 R18 条目对匿名 API 请求隐藏（detail 直接 404），所以兰斯正传这类经典
+// 即使带 Galgame 标签也不会被全量扫描入库；逆转裁判6/大逆/检事等则只被标成 AVG/推理。
+// 这里用站长 Bangumi token 按 subject_id 定向补录（兰斯正传 01/02/03/4.1/4.2/5D/6/战国兰斯/8/9/10/鬼畜王
+// + 逆转裁判主系列缺失项）。想再收某部作品时往数组里加 bgm subject id，下次游戏同步会自动刷新。
+const CURATED_GAME_IDS = [
+  // —— 兰斯系列（多为 R18，匿名不可见）——
+  75442,  // 兰斯1 -寻找小光-（1989 初代）
+  80316,  // 兰斯01 寻找小光（重制）
+  75508,  // 兰斯02 -反叛的少女们-（重制）
+  134929, // 兰斯03 利萨斯陷落（重制）
+  83965,  // 兰斯4.1 ～拯救药工场！～
+  83997,  // 兰斯4.2 ～天使组～
+  11161,  // 兰斯5D：孤单的女孩子
+  11168,  // 兰斯6 - 赛斯崩坏 -
+  1795,   // 战国兰斯（兰斯7）
+  19750,  // 兰斯8（Rance Quest）
+  88739,  // 兰斯9 赫尔曼革命
+  226254, // 兰斯10 决战
+  11158,  // 鬼畜王兰斯
+  // —— 逆转裁判主系列缺失项（无 Galgame 标签）——
+  145434, // 逆转裁判6
+  102690, // 大逆转裁判 成步堂龙之介的冒险
+  192977, // 大逆转裁判2 成步堂龙之介的觉悟
+  3236,   // 逆转检事
+  11129,  // 逆转检事2
+  18438   // 雷顿教授VS逆转裁判
+];
+
+// 用站长 token 逐条拉取 CURATED_GAME_IDS 并 upsert；分类失败时按策展列表强制归入 galgame
+async function importCuratedGames() {
+  const [rows] = await pool.query('SELECT * FROM users WHERE is_owner = 1 AND access_token IS NOT NULL LIMIT 1');
+  if (!rows || !rows.length) return { ok: false, reason: '未找到站长 Bangumi token，跳过策展补录' };
+  const token = await getValidToken(rows[0]);
+  if (!token) return { ok: false, reason: '站长 Bangumi token 失效，跳过策展补录' };
+  const stmt = pool.getConnection();
+  let added = 0;
+  let failed = 0;
+  try {
+    for (const id of CURATED_GAME_IDS) {
+      try {
+        const item = await bgm('/v0/subjects/' + id, { token });
+        const category = classifyGame(item) || 'galgame';
+        const row = toRow(category, item);
+        await stmt.query(
+          'INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, blocked, updated_at) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+          'ON CONFLICT(subject_id, category) DO UPDATE SET ' +
+          "name = excluded.name, name_cn = excluded.name_cn, image = excluded.image, " +
+          "air_date = excluded.air_date, rating_score = excluded.rating_score, " +
+          "rating_total = excluded.rating_total, rank = excluded.rank, platform = excluded.platform, " +
+          "tags = excluded.tags, regions = excluded.regions, blocked = excluded.blocked, " +
+          "updated_at = excluded.updated_at",
+          [row.subject_id, row.category, row.name, row.name_cn, row.image, row.air_date,
+           row.rating_score, row.rating_total, row.rank, row.platform, row.tags, row.regions, row.blocked, row.updated_at]
+        );
+        added++;
+      } catch (e) {
+        failed++;
+        console.error('[library] 策展补录失败 subject=' + id + ':', e.message);
+      }
+      await delay(120);
+    }
+  } finally {
+    stmt.release();
+  }
+  return { ok: true, added, failed };
 }
 
 // 是否应排除：有地区标签但没有任何允许地区（即明确非中日韩）
@@ -157,7 +240,12 @@ async function runSync(options = {}) {
       }
     };
     if (doBooks) await fetchAllBooks((batch) => insertBatch(classify, batch));
-    if (doGames) await fetchAllGames((batch) => insertBatch(classifyGame, batch));
+    if (doGames) {
+      await fetchAllGames((batch) => insertBatch(classifyGame, batch));
+      // 匿名列表看不到的 R18/无 Galgame 标签经典系列，用站长 token 定向补录
+      const curated = await importCuratedGames();
+      if (!curated || !curated.ok) console.error('[library] 策展补录:', curated && curated.reason);
+    }
     // 计数以库内实时数据为准（兼容只同步单类/多分类合并的场景），不再按本次抓取行数累加
     const mergedCounts = await liveCounts();
     lastSync = { ok: true, at: new Date().toISOString(), counts: mergedCounts };
@@ -327,4 +415,4 @@ async function getStatus() {
   };
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, regionsOf, getStatus };
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus };
