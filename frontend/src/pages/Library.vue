@@ -339,14 +339,39 @@ async function triggerSync() {
   }
 }
 
-// Galgame 新作 · 发售日历（VNDB 增强源）：最近 30 天发售 + 未来 45 天定档，库内条目可跳站内详情
+// 新作 · 发售日历：Galgame 走 VNDB 新作速报；漫画/轻小说走 Bangumi 新登载流（近期出版 + 即将出版）
+// 三个分类共用同一套卡片样式/交互，仅数据源与文案不同。
+const CAL_CFG = {
+  galgame: {
+    api: '/anime/release-calendar?recentDays=30&upcomingDays=45&limit=18',
+    title: '🎮 Galgame 新作 · 发售日历',
+    src: '数据源 VNDB · 日/中/韩原语',
+    recentLabel: '近期发售', upcomingLabel: '即将发售'
+  },
+  manga: {
+    api: '/anime/book-release-calendar?category=manga&recentDays=30&upcomingDays=45&limit=18',
+    title: '📚 漫画新作 · 发售日历',
+    src: '数据源 Bangumi · 新登载漫画/新卷',
+    recentLabel: '近期出版', upcomingLabel: '即将出版'
+  },
+  lightnovel: {
+    api: '/anime/book-release-calendar?category=lightnovel&recentDays=30&upcomingDays=45&limit=18',
+    title: '📖 轻小说新作 · 发售日历',
+    src: '数据源 Bangumi · 新登载轻小说/新刊',
+    recentLabel: '近期出版', upcomingLabel: '即将出版'
+  }
+};
+const calCfg = computed(() => CAL_CFG[category.value] || null);
 const releaseCal = ref({ recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} });
 const calReady = ref(false);
 const calGroups = computed(() => {
+  const cfg = calCfg.value;
   const r = releaseCal.value;
   const out = [];
-  if (r.recent && r.recent.length) out.push({ key: 'recent', icon: '🆕', label: '近期发售（近 30 天 · ' + (r.recentTotal || r.recent.length) + '）', items: r.recent });
-  if (r.upcoming && r.upcoming.length) out.push({ key: 'upcoming', icon: '📅', label: '即将发售（' + (r.upcomingTotal || r.upcoming.length) + '）', items: r.upcoming });
+  const recentLabel = (cfg && cfg.recentLabel) || '近期发售';
+  const upcomingLabel = (cfg && cfg.upcomingLabel) || '即将发售';
+  if (r.recent && r.recent.length) out.push({ key: 'recent', icon: '🆕', label: recentLabel + '（近 30 天 · ' + (r.recentTotal || r.recent.length) + '）', items: r.recent });
+  if (r.upcoming && r.upcoming.length) out.push({ key: 'upcoming', icon: '📅', label: upcomingLabel + '（' + (r.upcomingTotal || r.upcoming.length) + '）', items: r.upcoming });
   return out;
 });
 const relRunText = computed(() => {
@@ -359,15 +384,16 @@ function relItemTitle(it) {
   return (it.romanized && it.romanized !== main ? main + ' · ' + it.romanized : main);
 }
 function onRelItemClick(it, e) {
-  if (!it.bgmId) return; // 无库内条目：交给浏览器开 VNDB
+  if (!it.bgmId) return; // 无 bgm 条目（VNDB 未对齐库）：交给浏览器开站外链接
   e.preventDefault();
   router.push('/subject/' + it.bgmId);
 }
 async function loadReleaseCal() {
-  if (category.value !== 'galgame') { calReady.value = false; return; }
+  const cfg = calCfg.value;
+  if (!cfg) { calReady.value = false; releaseCal.value = { recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} }; return; }
   try {
     calReady.value = false;
-    const d = await api.get('/anime/release-calendar?recentDays=30&upcomingDays=45&limit=18');
+    const d = await api.get(cfg.api);
     releaseCal.value = d || { recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} };
   } catch (e) {
     releaseCal.value = { recent: [], upcoming: [], recentTotal: 0, upcomingTotal: 0, stats: {} };
@@ -375,7 +401,7 @@ async function loadReleaseCal() {
     calReady.value = true;
   }
 }
-watch(category, (v) => { if (v === 'galgame') loadReleaseCal(); });
+watch(category, (v) => { if (CAL_CFG[v]) loadReleaseCal(); });
 onMounted(() => { readQuery(); loadLibStatus(); load(); loadReleaseCal(); });
 // 翻页/筛选通过 router.replace 更新 query（页面不再整页重挂载），监听 query 同步并重新加载
 watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
@@ -440,20 +466,20 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
       <span v-for="k in HOT" :key="k" class="hot-tag" @click="hot(k)">{{ k }}</span>
     </div>
 
-    <!-- Galgame 新作 · 发售日历（VNDB 增强源：近期发售 + 未来定档） -->
-    <div v-if="category === 'galgame' && !keyword.trim() && calReady && calGroups.length" class="rel-cal" v-reveal>
+    <!-- 新作 · 发售日历（Galgame/VNDB；漫画/轻小说：Bangumi 新登载流：近期出版 + 即将出版） -->
+    <div v-if="category !== 'anime' && !keyword.trim() && calReady && calGroups.length && calCfg" class="rel-cal" v-reveal>
       <div class="rel-head">
-        <span class="rel-title">🎮 Galgame 新作 · 发售日历</span>
-        <span class="rel-src">数据源 VNDB · 日/中/韩原语<template v-if="relRunText">{{ relRunText }}</template></span>
+        <span class="rel-title">{{ calCfg.title }}</span>
+        <span class="rel-src">{{ calCfg.src }}<template v-if="relRunText">{{ relRunText }}</template></span>
       </div>
       <div v-for="g in calGroups" :key="g.key" class="rel-group">
         <div class="rel-sub">{{ g.icon }} {{ g.label }}</div>
         <div class="rel-row">
           <a
             v-for="it in g.items"
-            :key="g.key + '-' + it.vndbId"
+            :key="g.key + '-' + (it.bgmId || it.vndbId || it.title)"
             class="rel-item"
-            :href="it.bgmId ? undefined : it.vndbUrl"
+            :href="it.bgmId ? undefined : (it.vndbUrl || undefined)"
             :target="it.bgmId ? undefined : '_blank'"
             :rel="it.bgmId ? undefined : 'noopener'"
             :title="relItemTitle(it)"
@@ -465,7 +491,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
               <div class="rel-name">{{ it.title }}</div>
               <div class="rel-line">{{ it.dateText }}<template v-if="it.developers && it.developers.length"> · {{ it.developers[0] }}</template></div>
               <div class="rel-badges">
-                <span class="rel-badge">{{ it.langLabel }}</span>
+                <span v-if="it.langLabel" class="rel-badge">{{ it.langLabel }}</span>
                 <span v-if="it.inLibrary" class="rel-badge lib">⭐ 库内</span>
               </div>
             </div>

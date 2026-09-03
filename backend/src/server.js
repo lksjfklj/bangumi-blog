@@ -178,6 +178,7 @@ app.use((err, req, res, next) => {
 
   library.startScheduler();
   require('./releasecal').startScheduler(); // Galgame 新作发售日历（VNDB）：启动 20s 后首扫 + 每 6h 增量
+  require('./bookrelease').startScheduler(); // 漫画/轻小说 新作发售日历（Bangumi date 流）：启动 20s 后首扫 + 每 6h 增量
   app.listen(config.port, config.host, () => {
     logger.info('[server] listening', { port: config.port, host: config.host, node: process.version });
   });

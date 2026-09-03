@@ -4,6 +4,7 @@ const { bgm, bgmWeb, cached } = require('../bangumi');
 const { queryLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
 const { requireOwner } = require('../auth');
 const releasecal = require('../releasecal');
+const bookrelease = require('../bookrelease');
 const { pool } = require('../db');
 const router = express.Router();
 
@@ -396,6 +397,29 @@ router.get('/release-calendar/status', requireOwner, async (req, res, next) => {
 router.post('/release-calendar/scan', requireOwner, async (req, res, next) => {
   try {
     res.json(await releasecal.scanOnce({ digest: !(req.body && req.body.digest === false) }));
+  } catch (e) { next(e); }
+});
+
+// ---------- 漫画/轻小说 新作发售日历（Bangumi sort=date 新登载流） ----------
+// 数据由 bookrelease 定时扫描写入 bgm_book_release_calendar；本组接口只读，供漫画/轻小说 tab 展示。
+router.get('/book-release-calendar', async (req, res, next) => {
+  try {
+    res.json(await bookrelease.getCalendar({
+      category: req.query.category || 'manga',
+      recentDays: req.query.recentDays ? +req.query.recentDays : undefined,
+      upcomingDays: req.query.upcomingDays ? +req.query.upcomingDays : undefined,
+      limit: req.query.limit ? +req.query.limit : undefined
+    }));
+  } catch (e) { next(e); }
+});
+// 扫描器状态/进度（站长可见）
+router.get('/book-release-calendar/status', requireOwner, async (req, res, next) => {
+  try { res.json(await bookrelease.getStatus()); } catch (e) { next(e); }
+});
+// 手动触发一轮扫描（回填/刷新近期出版窗口）
+router.post('/book-release-calendar/scan', requireOwner, async (req, res, next) => {
+  try {
+    res.json(await bookrelease.scanOnce({}));
   } catch (e) { next(e); }
 });
 

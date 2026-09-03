@@ -301,6 +301,28 @@ CREATE INDEX IF NOT EXISTS idx_vndb_cal_rel ON vndb_release_calendar(released);
 CREATE INDEX IF NOT EXISTS idx_vndb_cal_olang ON vndb_release_calendar(olang, released);
 CREATE INDEX IF NOT EXISTS idx_vndb_cal_seen ON vndb_release_calendar(seen, released);
 `
+  },
+  {
+    id: 7,
+    name: 'bgm-book-release-cal-v7',
+    sql: `
+CREATE TABLE IF NOT EXISTS bgm_book_release_calendar (
+  subject_id INTEGER PRIMARY KEY,
+  category TEXT NOT NULL,
+  name TEXT DEFAULT '',
+  name_cn TEXT DEFAULT '',
+  image TEXT DEFAULT '',
+  date TEXT DEFAULT '',
+  platform TEXT DEFAULT '',
+  rating_score REAL DEFAULT 0,
+  rating_total INTEGER DEFAULT 0,
+  rank INTEGER DEFAULT 0,
+  meta_tags TEXT DEFAULT '[]',
+  created_at INTEGER DEFAULT 0,
+  updated_at INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bgm_book_cal_cat_date ON bgm_book_release_calendar(category, date);
+`
   }
 ];
 
