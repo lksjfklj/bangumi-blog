@@ -12,7 +12,7 @@ const MIN_GAP_MS = 1000;
 // 搜索时拉取的字段：标题族（title/alttitle/titles/aliases）用于跨语言匹配，
 // 其余（发行/评分/热度/平台/开发商/封面/时长）用于回填库内 ext。
 const SEARCH_FIELDS =
-  'id, title, alttitle, titles, aliases, released, rating, votecount, popularity, platforms, developers, olang, image.url, length';
+  'id, title, alttitle, titles.lang, titles.title, titles.latin, aliases, released, rating, votecount, popularity, platforms, developers.name, olang, image.url, length';
 
 let proxyDispatcher = null;
 if (config.bangumi.proxy) {
@@ -102,7 +102,7 @@ async function vnSearch(query, { limit = 6 } = {}) {
     if (e && e.snippet && /too much data/i.test(e.snippet)) {
       const data = await apiPost('vn', {
         filters: ['search', '=', query],
-        fields: 'id, title, alttitle, titles, released, rating, votecount, image.url',
+        fields: 'id, title, alttitle, titles.lang, titles.title, titles.latin, released, rating, votecount, image.url',
         results: Math.min(3, limit),
         sort: 'searchrank'
       });
@@ -250,3 +250,4 @@ function summarizeVn(vn) {
 }
 
 module.exports = { apiPost, vnSearch, vnById, normalizeTitle, scorePair, pickBestVn, matchDecision, summarizeVn, yearMatches };
+
