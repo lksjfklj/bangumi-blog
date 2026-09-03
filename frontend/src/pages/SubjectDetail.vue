@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
   NSpin, NButton, NTag, NRate, NInput, NSelect, NModal, NEmpty, NAlert, NPopconfirm,
@@ -13,6 +13,22 @@ const route = useRoute();
 const router = useRouter();
 const message = useMessage();
 const userStore = useUserStore();
+
+// 简介过长：折叠 120px + 底部渐隐，可展开全文/收起
+const summaryExpanded = ref(false);
+const summaryEl = ref(null);
+const summaryLong = ref(false);
+
+function measureSummary() {
+  const el = summaryEl.value;
+  if (!el || summaryExpanded.value) return; // 展开态无 max-height，不需要测
+  summaryLong.value = el.scrollHeight > el.clientHeight + 2;
+}
+function toggleSummary() {
+  summaryExpanded.value = !summaryExpanded.value;
+  if (!summaryExpanded.value) nextTick(measureSummary); // 收起后重新判断
+}
+function onWinResize() { measureSummary(); }
 
 const id = computed(() => +route.params.id);
 const subject = ref(null);
@@ -165,8 +181,15 @@ function goBack() {
   if (st && st.back) router.back();
   else router.replace('/anime');
 }
-onMounted(loadSubject);
+onMounted(() => { window.addEventListener('resize', onWinResize); loadSubject(); });
+onBeforeUnmount(() => window.removeEventListener('resize', onWinResize));
 watch(id, loadSubject);
+// 每条目加载完成后检测简介是否超长
+watch(subject, (sVal) => {
+  summaryExpanded.value = false;
+  summaryLong.value = false;
+  if (sVal && sVal.summary) nextTick(measureSummary);
+});
 </script>
 
 <template>
@@ -217,7 +240,10 @@ watch(id, loadSubject);
               <span class="muted" style="margin-right:4px">我的标签：</span>
               <n-tag v-for="t in parseTags(collection.tags)" :key="t" size="small" type="info" :bordered="false" style="margin:2px">{{ t }}</n-tag>
             </div>
-            <div class="summary" v-if="subject.summary">{{ subject.summary }}</div>
+            <div v-if="subject.summary" class="summary-box" :class="{ long: summaryLong, expanded: summaryExpanded }">
+                <div ref="summaryEl" class="summary" :class="{ expanded: summaryExpanded, long: summaryLong }">{{ subject.summary }}</div>
+                <button v-if="summaryLong" class="summary-toggle" @click="toggleSummary">{{ summaryExpanded ? '收起 ↑' : '展开全部 ↓' }}</button>
+              </div>
           </div>
         </div>
 
@@ -324,7 +350,12 @@ watch(id, loadSubject);
 .score-line { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
 .score { font-size: 26px; font-weight: 800; color: var(--accent); }
 .tags { margin: 8px 0; }
-.summary { margin-top: 12px; color: var(--text-dim); font-size: 13px; line-height: 1.7; max-height: 96px; overflow: hidden; }
+.summary-box { position: relative; margin-top: 12px; }
+.summary { position: relative; color: var(--text-dim); font-size: 13px; line-height: 1.7; max-height: 120px; overflow: hidden; white-space: pre-line; word-break: break-word; }
+.summary.long:not(.expanded)::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 48px; pointer-events: none; background: linear-gradient(to bottom, transparent, var(--bg)); }
+.summary.expanded { max-height: none; }
+.summary-toggle { display: block; margin-top: 4px; padding: 0; border: none; background: none; color: var(--accent); font-size: 12px; cursor: pointer; opacity: .9; }
+.summary-toggle:hover { opacity: 1; text-decoration: underline; }
 .col-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .my-tags { margin-top: 10px; font-size: 13px; }
 .detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 24px; margin-top: 10px; }
