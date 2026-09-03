@@ -272,7 +272,8 @@ router.get('/browser', async (req, res, next) => {
     // 本地内容库分类（漫画/轻小说/Galgame）：本地全量库查询，翻页无上限、支持地区/年份/标签/关键词筛选
     const category = String(req.query.category || '').trim();
     if (category === 'manga' || category === 'lightnovel' || category === 'galgame') {
-      const sort = ['rank', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'rank';
+      // 书籍排序：默认「近期注目」（本地库按近一年发行 + 热度倒序），支持 trends/rank/title/rating
+      const sort = ['trends', 'rank', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'trends';
       const keyword = String(req.query.keyword || '').trim().slice(0, 100);
       const tag = /^[\u4e00-\u9fa5A-Za-z0-9 _\-·+]{1,20}$/.test(String(req.query.tag || '').trim()) ? String(req.query.tag).trim() : '';
       const year = /^(19\d{2}|20[0-2]\d)$/.test(String(req.query.year || '').trim()) ? String(req.query.year).trim() : '';

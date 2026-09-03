@@ -690,7 +690,9 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   const offset = (safePage - 1) * limit;
   const order = sort === 'title' ? 'ORDER BY name_cn ASC, name ASC'
     : sort === 'rating' ? 'ORDER BY rating_score DESC, rating_total DESC'
-    : 'ORDER BY rank ASC, rating_score DESC';
+    : sort === 'trends'
+      ? "ORDER BY CASE WHEN air_date BETWEEN date('now', '-365 day') AND date('now') THEN 0 ELSE 1 END, rating_total DESC, air_date DESC, rank ASC"
+      : 'ORDER BY rank ASC, rating_score DESC';
   const [rows] = await pool.query(
     `SELECT subject_id AS id, category, name, name_cn, image, air_date,
             rating_score, rating_total, rank, platform, tags, regions

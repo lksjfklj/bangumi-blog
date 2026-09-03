@@ -12,7 +12,7 @@ const router = useRouter();
 const mode = ref('browse'); // browse | search
 const keyword = ref('');
 const searchType = ref(2);
-const browseSort = ref('trends'); // 番剧默认「近期注目」（书籍默认排名，见 defaultBrowseSort）
+const browseSort = ref('trends'); // 番剧/书籍默认均「近期注目」（见 defaultBrowseSort）
 const page = ref(1);
 const size = 24;
 const result = ref([]);
@@ -35,8 +35,8 @@ const categories = [
 ];
 // 本地内容库分类（漫画/轻小说/Galgame 都走本地同步库；番剧走 Bangumi 在线榜单）
 const isBook = computed(() => category.value !== 'anime');
-// 默认排序：番剧按「近期注目」，书籍按排名
-const defaultBrowseSort = computed(() => isBook.value ? 'rank' : 'trends');
+// 默认排序：番剧与书籍（漫画/轻小说/Galgame）统一按「近期注目」
+const defaultBrowseSort = computed(() => 'trends');
 
 const typeOptions = [
   { label: '动画', value: 2 },
@@ -48,6 +48,7 @@ const typeOptions = [
 // 番剧排序（bgm.tv 榜单）；书籍排序（本地库）
 const browseSortOptions = computed(() => isBook.value
   ? [
+      { label: '近期注目', value: 'trends' },
       { label: '按排名', value: 'rank' },
       { label: '按名称', value: 'title' },
       { label: '按评分', value: 'rating' }
