@@ -48,11 +48,12 @@ const colLoading = ref(true);
 const vndb = computed(() => subject.value?.vndb || null);
 const VNDB_LENGTH = { 1: '很短', 2: '较短', 3: '中等', 4: '较长', 5: '很长' };
 const VNDB_PLATFORMS = {
-  win: 'Windows', linux: 'Linux', mac: 'macOS', ios: 'iOS', android: 'Android', web: 'Web',
-  psp: 'PSP', psvita: 'PS Vita', 'ps1': 'PS1', 'ps2': 'PS2', 'ps3': 'PS3', 'ps4': 'PS4', 'ps5': 'PS5',
-  xbox: 'Xbox', xbox360: 'Xbox 360', xboxone: 'Xbox One', xboxsx: 'Xbox Series X/S', switch: 'Switch',
-  nds: 'NDS', '3ds': '3DS', gba: 'GBA', sfc: 'SFC', nes: 'FC/NES', ss: 'SS', dc: 'Dreamcast',
-  pce: 'PCE', pc98: 'PC-98', dvd: 'DVD', bdp: '蓝光', flash: 'Flash', mobile: '手机'
+  win: 'Windows', lin: 'Linux', mac: 'macOS', ios: 'iOS', and: 'Android', web: '网页', mob: '手机(其他)',
+  psp: 'PSP', psv: 'PS Vita', ps1: 'PS1', ps2: 'PS2', ps3: 'PS3', ps4: 'PS4', ps5: 'PS5',
+  xb3: 'Xbox 360', xbo: 'Xbox One', xxs: 'Xbox Series', swi: 'Switch', sw2: 'Switch 2',
+  nds: 'NDS', n3d: '3DS', gba: 'GBA', gbc: 'GBC', nes: 'FC/NES', sfc: 'SFC', wii: 'Wii', wiiu: 'Wii U',
+  sat: '土星', drc: 'Dreamcast', vnd: 'VNDS', dos: 'DOS', fmt: 'FM Towns', p98: 'PC-98', pcf: 'PC-FX',
+  dvd: 'DVD', bdp: '蓝光播放器', oth: '其他'
 };
 const VNDB_LANGS = { ja: '日语', zh: '中文', en: '英语', ko: '韩语', ru: '俄语', fr: '法语', de: '德语', es: '西班牙语', it: '意大利语', pt: '葡萄牙语' };
 function vndbPlatformLabel(p) { return VNDB_PLATFORMS[p] || String(p || '').toUpperCase(); }
