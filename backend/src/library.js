@@ -1,6 +1,9 @@
-// library.js - 书籍库（漫画/轻小说）全量同步与查询
-// 数据源：Bangumi v0 API /v0/subjects?type=1（书籍全量，含 platform/tags/meta_tags/rating）
-// 分类规则：platform=漫画 -> 漫画；platform=小说 且 标签含「轻小说」 -> 轻小说
+// library.js - 本地内容库（漫画 / 轻小说 / Galgame·视觉小说）全量同步与查询
+// 数据源：Bangumi v0 API /v0/subjects 全量列表（rank 排序）
+//   书籍 type=1（含 platform/tags/meta_tags/rating）-> 漫画 / 轻小说
+//   游戏 type=4（platform 恒为「游戏」，需按社区标签判定）-> galgame（Galgame/视觉小说/乙女/百合向）
+// 书籍分类规则：platform=漫画 -> 漫画；platform=小说 且 标签含「轻小说」 -> 轻小说
+// 游戏分类规则：meta_tags ∪ 用户 tags 命中强标记集合（见 GALGAME_MARKERS）-> galgame
 // 地区规则：按每本书的用户标签判定；明确标注为非中日韩地区的条目标记 blocked=1 排除；
 //          未标注地区的条目保留（bgm 书籍库以中日韩为主），前端可用「地区」筛选只看已确认的中日韩。
 const { bgm } = require('./bangumi');
@@ -12,7 +15,7 @@ const ALLOWED_REGIONS = ['日本', '中国', '韩国', '台湾', '香港'];
 const REGION_TAGS = ['日本', '中国', '韩国', '台湾', '香港', '美国', '法国', '英国', '德国', '泰国', '俄罗斯', '意大利', '西班牙', '加拿大', '马来西亚', '印度', '巴西', '澳大利亚', '新加坡'];
 
 const CATEGORY_PLATFORM = { manga: '漫画', lightnovel: '轻小说' };
-const CATEGORY_SQL = { manga: "category = 'manga'", lightnovel: "category = 'lightnovel'" };
+const CATEGORY_SQL = { manga: "category = 'manga'", lightnovel: "category = 'lightnovel'", galgame: "category = 'galgame'" };
 
 let syncing = false;
 let lastSync = null; // { ok, at, counts }
@@ -38,6 +41,18 @@ function classify(item) {
   if (platform === '漫画') return 'manga';
   if (platform === '小说' && names.has('轻小说')) return 'lightnovel';
   return null;
+}
+
+// 返回 'galgame' | null：bgm 游戏条目的 platform 恒为「游戏」，无法像书籍那样按平台划分，
+// 只能靠社区标签判定。meta_tags（官方/高权重标签）∪ 用户 tags 命中以下任一强标记即视为视觉小说向；
+// 想收紧/放宽收录范围时，直接调整这份集合即可。
+const GALGAME_MARKERS = [
+  'Galgame', 'galgame', 'GAL', '视觉小说', 'VN', '文字冒险',
+  '乙女', '乙女向', '乙女ゲー', '乙女ゲーム', 'BL', 'BLゲー', 'GL'
+];
+function classifyGame(item) {
+  const names = tagNames(item);
+  return GALGAME_MARKERS.some(m => names.has(m)) ? 'galgame' : null;
 }
 
 // 是否应排除：有地区标签但没有任何允许地区（即明确非中日韩）
@@ -68,19 +83,27 @@ function toRow(category, item) {
   };
 }
 
-// 拉取全部书籍（type=1，rank 排序，offset 分页）
-async function fetchAllBooks(onBatch) {
+// 拉取指定类型条目全量（rank 排序，offset 分页，每页 50）
+// stopOnRangeEnd：游戏库 offset 越界时 v0 列表接口返回 HTTP 400，视为已到库底（正常结束）
+async function fetchByType(type, onBatch, { stopOnRangeEnd = false } = {}) {
   const limit = 50;
   let offset = 0;
   let total = 0;
   for (;;) {
     let data;
     try {
-      data = await bgm(`/v0/subjects?type=1&sort=rank&offset=${offset}&limit=${limit}`);
+      data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`);
     } catch (e) {
+      // 游戏库已拉到底（offset 越界返回 400）
+      if (stopOnRangeEnd && e && e.status === 400) break;
       // 失败重试一次（网络/限流），仍失败则抛错终止本次同步
       await delay(600);
-      data = await bgm(`/v0/subjects?type=1&sort=rank&offset=${offset}&limit=${limit}`);
+      try {
+        data = await bgm(`/v0/subjects?type=${type}&sort=rank&offset=${offset}&limit=${limit}`);
+      } catch (e2) {
+        if (stopOnRangeEnd && e2 && e2.status === 400) break;
+        throw e2;
+      }
     }
     const batch = (data && data.data) || (Array.isArray(data) ? data : []);
     if (!batch.length) break;
@@ -93,24 +116,29 @@ async function fetchAllBooks(onBatch) {
   return total;
 }
 
+async function fetchAllBooks(onBatch) { return fetchByType(1, onBatch); }
+async function fetchAllGames(onBatch) { return fetchByType(4, onBatch, { stopOnRangeEnd: true }); }
+
 // 全量同步入库
-async function runSync() {
+// 默认只同步书籍（type=1，历史行为，12h 定时器沿用）；游戏（type=4）全量拉取较重，
+// 仅在显式请求时同步：手动「重新同步」或调度器按 last_run_games 的 7 天周期触发。
+// 可传 { types: [4] } 只同步游戏；{ types: [1, 4] } 书籍+游戏一起同步。
+async function runSync(options = {}) {
   if (syncing) return { ok: false, reason: 'already syncing' };
   syncing = true;
   const started = Date.now();
-  const counts = { manga: 0, lightnovel: 0, total: 0, blocked: 0 };
+  const types = Array.isArray(options && options.types) ? options.types.map(Number) : null;
+  const doBooks = !types || types.includes(1);
+  const doGames = !types || types.includes(4);
   try {
     await setMeta('status', 'syncing');
-    await fetchAllBooks(async (batch) => {
+    const insertBatch = async (classifier, batch) => {
       const stmt = pool.getConnection();
       try {
         for (const item of batch) {
-          const category = classify(item);
+          const category = classifier(item);
           if (!category) continue;
           const row = toRow(category, item);
-          counts[category] += 1;
-          counts.total += 1;
-          if (row.blocked) counts.blocked += 1;
           await stmt.query(
             `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, blocked, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -127,12 +155,18 @@ async function runSync() {
       } finally {
         stmt.release();
       }
-    });
-    lastSync = { ok: true, at: new Date().toISOString(), counts };
+    };
+    if (doBooks) await fetchAllBooks((batch) => insertBatch(classify, batch));
+    if (doGames) await fetchAllGames((batch) => insertBatch(classifyGame, batch));
+    // 计数以库内实时数据为准（兼容只同步单类/多分类合并的场景），不再按本次抓取行数累加
+    const mergedCounts = await liveCounts();
+    lastSync = { ok: true, at: new Date().toISOString(), counts: mergedCounts };
     await setMeta('status', 'done');
-    await setMeta('last_run', lastSync.at);
-    await setMeta('counts', JSON.stringify(counts));
-    return { ok: true, counts, elapsedMs: Date.now() - started };
+    await setMeta('last_synced', lastSync.at); // 展示用：最近一次（任意分类）同步时间
+    if (doBooks) await setMeta('last_run', lastSync.at);       // 书籍 12h 周期基准
+    if (doGames) await setMeta('last_run_games', lastSync.at); // 游戏 7 天周期基准
+    await setMeta('counts', JSON.stringify(mergedCounts));
+    return { ok: true, counts: mergedCounts, elapsedMs: Date.now() - started };
   } catch (e) {
     lastSync = { ok: false, at: new Date().toISOString(), error: e.message };
     await setMeta('status', 'error');
@@ -141,6 +175,23 @@ async function runSync() {
   } finally {
     syncing = false;
   }
+}
+
+// 从库内实时统计各分类已收录数量（blocked=1 为判定非中日韩地区、不参与展示的条目，不计入展示数）
+async function liveCounts() {
+  const counts = { manga: 0, lightnovel: 0, galgame: 0, total: 0, blocked: 0 };
+  try {
+    const [rows] = await pool.query(
+      "SELECT category, COUNT(*) AS n FROM library_subjects WHERE blocked = 0 GROUP BY category"
+    );
+    for (const r of rows) {
+      if (Object.prototype.hasOwnProperty.call(counts, r.category)) counts[r.category] = Number(r.n);
+    }
+    const [b] = await pool.query("SELECT COUNT(*) AS n FROM library_subjects WHERE blocked = 1");
+    counts.blocked = Number((b && b[0] && b[0].n) || 0);
+    counts.total = counts.manga + counts.lightnovel + counts.galgame;
+  } catch (e) { /* ignore */ }
+  return counts;
 }
 
 async function setMeta(key, value) {
@@ -159,7 +210,7 @@ async function getMeta(key) {
   } catch (e) { return ''; }
 }
 
-// 首次启动/每日定时：若库为空或距上次同步超过 12 小时则同步
+// 定时同步：书籍每 12h（库为空则立即）；Galgame 库为空或距上次游戏同步超过 7 天时单独同步
 async function ensureSync() {
   if (syncing) return;
   try {
@@ -170,6 +221,13 @@ async function ensureSync() {
     if (empty || stale) {
       await runSync();
     }
+    if (syncing) return; // 书籍同步占用中，游戏交给下一轮/手动
+    const [gRows] = await pool.query("SELECT COUNT(*) AS n FROM library_subjects WHERE category = 'galgame'");
+    const lastGames = await getMeta('last_run_games');
+    const gamesStale = !lastGames || (Date.now() - new Date(lastGames).getTime() > 7 * 24 * 3600 * 1000);
+    if (!gRows[0].n || gamesStale) {
+      await runSync({ types: [4] });
+    }
   } catch (e) { console.error('[library] ensureSync fail:', e.message); }
 }
 
@@ -178,17 +236,15 @@ async function syncStatus() {
   let restored = null;
   try {
     const status = await getMeta('status');
-    const last = await getMeta('last_run');
+    const last = await getMeta('last_synced') || await getMeta('last_run');
     if (last) {
-      let counts = null;
-      try { counts = JSON.parse(await getMeta('counts') || 'null'); } catch (e) {}
-      restored = { ok: status === 'done', at: last, counts };
+      restored = { ok: status === 'done', at: last, counts: await liveCounts() };
     }
   } catch (e) { /* ignore */ }
   return { syncing, lastSync: lastSync || restored, meta: null };
 }
 
-// 书籍库分页查询（category 必须为 manga/lightnovel）
+// 本地库分页查询（category: manga / lightnovel / galgame）
 async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', keyword = '', tag = '', year = '', region = '' }) {
   const where = [CATEGORY_SQL[category], 'blocked = 0'];
   const params = [];
@@ -236,7 +292,8 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
     const imgs = r.image ? { common: r.image, medium: r.image, large: r.image, grid: r.image, small: r.image } : undefined;
     return {
       id: r.id,
-      type: 1,
+      // 游戏分类按 Bangumi 类型 4 输出，详情页/卡片才能正确显示「游戏」
+      type: r.category === 'galgame' ? 4 : 1,
       category: r.category,
       name: r.name,
       name_cn: r.name_cn || r.name,
@@ -270,4 +327,4 @@ async function getStatus() {
   };
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, regionsOf, getStatus };
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, regionsOf, getStatus };

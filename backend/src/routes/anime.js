@@ -220,7 +220,8 @@ router.get('/library/status', async (req, res, next) => {
 });
 router.post('/library/sync', async (req, res, next) => {
   try {
-    const result = await runSync();
+    // 可选 body: { types: [1] | [4] }：只同步书籍或只同步游戏；缺省则两类全量同步
+    const result = await runSync({ types: (req.body && req.body.types) || undefined });
     res.json(result);
   } catch (e) {
     next(e);
@@ -229,9 +230,9 @@ router.post('/library/sync', async (req, res, next) => {
 // GET /api/anime/browser?page=1&sort=rank&tag=科幻&year=2024
 router.get('/browser', async (req, res, next) => {
   try {
-    // 书籍分类（漫画/轻小说）：本地全量库查询，翻页无上限、支持地区/年份/标签/关键词筛选
+    // 本地内容库分类（漫画/轻小说/Galgame）：本地全量库查询，翻页无上限、支持地区/年份/标签/关键词筛选
     const category = String(req.query.category || '').trim();
-    if (category === 'manga' || category === 'lightnovel') {
+    if (category === 'manga' || category === 'lightnovel' || category === 'galgame') {
       const sort = ['rank', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'rank';
       const keyword = String(req.query.keyword || '').trim().slice(0, 100);
       const tag = /^[\u4e00-\u9fa5A-Za-z0-9 _\-·+]{1,20}$/.test(String(req.query.tag || '').trim()) ? String(req.query.tag).trim() : '';

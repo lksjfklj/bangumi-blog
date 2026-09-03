@@ -8,7 +8,7 @@ import SubjectCard from '../components/SubjectCard.vue';
 const route = useRoute();
 const router = useRouter();
 
-// 番剧库：番剧（Bangumi 网页榜单）/ 漫画、轻小说（本地全量同步库）
+// 番剧库：番剧（Bangumi 网页榜单）/ 漫画、轻小说、Galgame·视觉小说（本地全量同步库）
 const mode = ref('browse'); // browse | search
 const keyword = ref('');
 const searchType = ref(2);
@@ -24,14 +24,16 @@ const browseTag = ref(null);    // 标签筛选
 const browseYear = ref(null);   // 年份筛选
 const browseAirtime = ref(null); // 季度筛选（番剧，如 2026-7）
 const browseRegion = ref(null); // 地区筛选（书籍）
-const category = ref('anime'); // anime | manga | lightnovel
+const category = ref('anime'); // anime | manga | lightnovel | galgame
 const libStatus = ref(null);  // 书籍库同步状态
 
 const categories = [
   { label: '番剧', value: 'anime' },
   { label: '漫画', value: 'manga' },
-  { label: '轻小说', value: 'lightnovel' }
+  { label: '轻小说', value: 'lightnovel' },
+  { label: 'Galgame', value: 'galgame' }
 ];
+// 本地内容库分类（漫画/轻小说/Galgame 都走本地同步库；番剧走 Bangumi 在线榜单）
 const isBook = computed(() => category.value !== 'anime');
 // 默认排序：番剧按「近期注目」，书籍按排名
 const defaultBrowseSort = computed(() => isBook.value ? 'rank' : 'trends');
@@ -113,7 +115,27 @@ const BOOK_TAG_OPTIONS = [
   { label: '原创', value: '原创' },
   { label: '文学', value: '文学' }
 ];
-const TAG_OPTIONS = computed(() => isBook.value ? BOOK_TAG_OPTIONS : ANIME_TAG_OPTIONS);
+const GALGAME_TAG_OPTIONS = [
+  { label: '剧情', value: '剧情' },
+  { label: '恋爱', value: '恋爱' },
+  { label: '悬疑', value: '悬疑' },
+  { label: '推理', value: '推理' },
+  { label: '科幻', value: '科幻' },
+  { label: '奇幻', value: '奇幻' },
+  { label: '日常', value: '日常' },
+  { label: '校园', value: '校园' },
+  { label: '百合', value: '百合' },
+  { label: '催泪', value: '催泪' },
+  { label: '治愈', value: '治愈' },
+  { label: '恐怖', value: '恐怖' },
+  { label: '全年龄', value: '全年龄' },
+  { label: '废萌', value: '废萌' },
+  { label: '泣きゲー', value: '泣きゲー' }
+];
+const TAG_OPTIONS = computed(() => {
+  if (category.value === 'galgame') return GALGAME_TAG_OPTIONS;
+  return isBook.value ? BOOK_TAG_OPTIONS : ANIME_TAG_OPTIONS;
+});
 const REGION_OPTIONS = [
   { label: '全部地区', value: '' },
   { label: '日本', value: '日本' },
@@ -159,11 +181,12 @@ const to = computed(() => (page.value - 1) * size + result.value.length);
 const HOT = computed(() => {
   if (category.value === 'manga') return ['海贼王', '进击的巨人', '灌篮高手', '鬼灭之刃', '葬送的芙莉莲'];
   if (category.value === 'lightnovel') return ['无职转生', '刀剑神域', '关于我转生变成史莱姆这档事', '魔法禁书目录', '凉宫春日的忧郁'];
+  if (category.value === 'galgame') return ['CLANNAD', '命运石之门', 'Ever17', '白色相簿2', 'Fate/stay night'];
   return ['进击的巨人', '孤独摇滚', '葬送的芙莉莲', '间谍过家家', '鬼灭之刃'];
 });
 const catLabel = computed(() => categories.find(c => c.value === category.value)?.label || '番剧');
 const emptyDescription = computed(() => {
-  if (isBook.value) return '没有找到相关内容（书籍库同步完成后可浏览全部' + catLabel.value + '）';
+  if (isBook.value) return '没有找到相关内容（本地内容库同步完成后可浏览全部' + catLabel.value + '）';
   if (mode.value === 'search' && keyword.value.trim()) return '🔍 没有找到「' + keyword.value.trim() + '」…换个关键词试试，或点上方热门标签';
   return '没有找到相关内容';
 });
@@ -222,7 +245,9 @@ async function load() {
 }
 
 // ---- URL query 同步：分类/筛选/页码写入路由，返回时能恢复原分类与筛选 ----
-const CATS = ['anime', 'manga', 'lightnovel'];
+// 地区筛选仅对书籍分类开放（Galgame 无「地区标签」语义，隐藏地区下拉）
+const showRegion = computed(() => category.value === 'manga' || category.value === 'lightnovel');
+const CATS = ['anime', 'manga', 'lightnovel', 'galgame'];
 function readQuery() {
   const q = route.query;
   category.value = typeof q.cat === 'string' && CATS.includes(q.cat) ? q.cat : 'anime';
@@ -296,11 +321,12 @@ async function onCategoryChange() {
   syncQuery(); // 重挂载后 onMounted 会 loadLibStatus + load
 }
 // 手动触发后台同步（同步中再次点击无效果）
+// 按当前分类只同步对应类型：漫画/轻小说 -> Bangumi 书籍(type=1)；Galgame -> 游戏(type=4)
 async function triggerSync() {
   errorMsg.value = '';
   libStatus.value = { ...(libStatus.value || {}), syncing: true };
   try {
-    const d = await api.post('/anime/library/sync');
+    const d = await api.post('/anime/library/sync', { types: category.value === 'galgame' ? [4] : [1] });
     await loadLibStatus();
     if (d && d.ok === false && d.reason === 'already syncing') { /* 已在同步 */ }
     page.value = 1;
@@ -323,7 +349,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
       <span class="emoji">🍡</span><h2>番剧库</h2>
     </div>
 
-    <!-- 分类：番剧 / 漫画 / 轻小说 -->
+    <!-- 分类：番剧 / 漫画 / 轻小说 / Galgame -->
     <div class="cat-tabs" v-reveal>
       <button
         v-for="c in categories"
@@ -355,19 +381,19 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
       <n-select v-model:value="browseTag" :options="TAG_OPTIONS" placeholder="全部标签" clearable style="width:150px" @update:value="onTagChange" />
       <n-select v-if="!isBook" v-model:value="browseAirtime" :options="quarterOptions" placeholder="全部季度" clearable style="width:140px" @update:value="onYearChange" />
       <n-select v-else v-model:value="browseYear" :options="yearOptions" placeholder="全部年份" clearable style="width:120px" @update:value="onYearChange" />
-      <n-select v-if="isBook" v-model:value="browseRegion" :options="REGION_OPTIONS" clearable style="width:130px" @update:value="onRegionChange" />
+      <n-select v-if="showRegion" v-model:value="browseRegion" :options="REGION_OPTIONS" clearable style="width:130px" @update:value="onRegionChange" />
       <span v-if="!isBook" class="muted filter-hint">季度按放送月份筛选（如 2026年7月番）；季度与类型标签二选一</span>
-      <span v-if="isBook" class="muted filter-hint">地区按 Bangumi 用户标签判定，未标注的默认保留</span>
+      <span v-if="showRegion" class="muted filter-hint">地区按 Bangumi 用户标签判定，未标注的默认保留</span>
     </div>
 
-    <!-- 书籍库同步状态 -->
+    <!-- 本地内容库同步状态 -->
     <div v-if="isBook && libStatus" class="sync-note" :class="{ syncing: libStatus.syncing }">
-      <span v-if="libStatus.syncing">⏳ 正在从 Bangumi 同步书籍数据…（首次约 1-2 分钟）</span>
+      <span v-if="libStatus.syncing">⏳ 正在从 Bangumi 同步本地内容库数据…（首次约 2-4 分钟）</span>
       <span v-else-if="libStatus.lastSync && libStatus.lastSync.ok">
-        ✅ 书籍库已同步：漫画 {{ libStatus.lastSync.counts?.manga || 0 }} 部 · 轻小说 {{ libStatus.lastSync.counts?.lightnovel || 0 }} 部
+        ✅ 本地内容库已同步：漫画 {{ libStatus.lastSync.counts?.manga || 0 }} 部 · 轻小说 {{ libStatus.lastSync.counts?.lightnovel || 0 }} 部 · Galgame {{ libStatus.lastSync.counts?.galgame || 0 }} 部
         <span class="muted">（{{ (libStatus.lastSync.at || '').replace('T', ' ').slice(0, 16) }}）</span>
       </span>
-      <span v-else>⚠️ 书籍库同步失败或尚未完成</span>
+      <span v-else>⚠️ 本地内容库同步失败或尚未完成</span>
       <button class="sync-btn" :disabled="libStatus.syncing" @click="triggerSync">重新同步</button>
     </div>
 
