@@ -257,13 +257,38 @@ async function fetchWith(srcOrUrl, opts = {}) {
 }
 
 // ---------- 抓取与入库 ----------
+// 抓取失败自动重试 1 次：源站偶发 fetch failed/超时/429/5xx 时先重试一次再告警，减少误报
+const FETCH_RETRIES = 1;                        // 失败后最多额外重试次数
+const RETRYABLE_HTTP_RE = /^HTTP (429|5\d\d)$/; // 仅这些 HTTP 状态值得重试，4xx 重试无意义
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// 单源抓取 XML：网络失败 / 超时 / 429 / 5xx 自动重试，全部失败才抛出
+async function fetchXml(src) {
+  let lastErr;
+  for (let attempt = 0; attempt <= FETCH_RETRIES; attempt++) {
+    try {
+      const res = await fetchWith(src.url, {
+        headers: { 'User-Agent': UA, Accept: 'application/rss+xml, application/xml, text/xml, */*' },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT)
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.text();
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e && e.message) || e);
+      const httpRetryable = RETRYABLE_HTTP_RE.test(msg);
+      const isHttpErr = /^HTTP \d/.test(msg);
+      // 已用完重试次数，或确定性的 4xx（重试无意义），直接抛出
+      if (attempt >= FETCH_RETRIES || (isHttpErr && !httpRetryable)) throw e;
+      console.warn('[watch] ' + src.key + ' 第 ' + (attempt + 1) + ' 次抓取失败（' + msg + '），稍后重试');
+      await sleep(800);
+    }
+  }
+  throw lastErr; // 理论不可达，保险
+}
+
 async function fetchOne(src) {
-  const res = await fetchWith(src.url, {
-    headers: { 'User-Agent': UA, Accept: 'application/rss+xml, application/xml, text/xml, */*' },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT)
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const xml = await res.text();
+  const xml = await fetchXml(src);
   const items = [];
   const re = /<item[\s\S]*?<\/item>/gi;
   let m;
