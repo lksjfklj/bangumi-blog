@@ -53,15 +53,17 @@ function tabLabel(t) {
 const importPercent = computed(() => {
   const j = importJob.value;
   if (!j) return 0;
-  if (!j.running) return 100;
+  if (!j.running) return j.queued ? 0 : 100;
   if (j.expected > 0) return Math.max(1, Math.min(99, Math.round((j.done / j.expected) * 100)));
   return 0;
 });
 const importDoneText = computed(() => {
   const j = importJob.value;
   if (!j) return '';
+  if (!j.running && j.queued) return '已进入同步队列，等待前面的任务完成后自动开始，请勿关闭页面…';
   const typeName = j.currentType ? ({ 1: '书籍', 2: '动画', 3: '音乐', 4: '游戏', 6: '三次元' }[j.currentType] || '条目') : '';
-  return `已导入 ${j.done} 条${typeName ? '（正在拉取' + typeName + '…）' : ''}`;
+  const action = j.kind === 'export' ? '已推送' : '已导入';
+  return `${action} ${j.done} 条${typeName ? '（正在处理' + typeName + '…）' : ''}`;
 });
 
 let loadSeq = 0;
@@ -100,33 +102,41 @@ function onTabChange() { page.value = 1; load(); }
 function onTagChange() { page.value = 1; load(); }
 function onPage(p) { page.value = p; load(); }
 
-async function importFromBgm() {
+// 统一的 Bangumi 同步入口（导入/推送都入全局队列，逐个执行；带每用户冷却）
+async function startSync(kind) {
   importing.value = true;
-  importJob.value = { running: true, done: 0, expected: 0, total: 0, currentType: 0, error: '' };
+  importJob.value = { kind, running: false, queued: true, done: 0, expected: 0, total: 0, currentType: 0, error: '' };
   try {
-    await api.post('/collections/import');
+    const d = await api.post(kind === 'export' ? '/collections/export' : '/collections/import');
+    if (d && d.ok === false) { throw new Error(d.error || (d.reason === 'already queued' ? '已有同步任务在排队，请等待完成后再试' : '请求被拒绝')); }
+    if (d && d.reason === 'rate-limited') { throw new Error('操作过于频繁，请 ' + (d.retryAfterSec || 60) + ' 秒后再试'); }
     pollImport();
   } catch (e) {
     importing.value = false;
     importJob.value = null;
-    message.error(e.message);
+    message.error(e.message || '请求失败');
   }
 }
+function importFromBgm() { startSync('import'); }
+function syncToBgm() { startSync('export'); }
 
 async function pollImport() {
   try {
     const d = await api.get('/collections/import/status');
     importJob.value = { ...(importJob.value || {}), ...d };
-    if (d.running) {
+    // 排队中或执行中都继续轮询；两者都结束才算完成
+    if (d.running || d.queued) {
       importTimer = setTimeout(pollImport, 1200);
       return;
     }
     importing.value = false;
+    const isExport = importJob.value && importJob.value.kind === 'export';
     if (d.error) {
-      message.error('导入失败：' + d.error);
+      message.error((isExport ? '推送失败：' : '导入失败：') + d.error);
     } else {
       const n = d.total || d.done || 0;
-      message.success(n ? '导入完成：' + n + ' 条' : '没有需要导入的收藏');
+      if (isExport) message.success('已推送 ' + n + ' 条到 Bangumi');
+      else message.success(n ? '导入完成：' + n + ' 条' : '没有需要导入的收藏');
     }
     importJob.value = null;
     page.value = 1;
@@ -138,33 +148,24 @@ async function pollImport() {
   }
 }
 
-async function syncToBgm() {
-  importing.value = true;
-  try {
-    const d = await api.post('/collections/export');
-    message.success('已推送 ' + d.pushed + ' 条到 Bangumi');
-  } catch (e) {
-    message.error(e.message);
-  }
-  importing.value = false;
-}
 
 function login() { location.href = '/login?redirect=/collection'; }
 
 async function loadUpdates() {
   updatesLoading.value = true;
   try {
-    const [u, un] = await Promise.all([
-      api.get('/watch/my-updates?limit=5'),
-      api.get('/watch/updates/unread?limit=1').catch(() => ({ unread: 0 }))
-    ]);
+    const u = await api.get('/watch/my-updates?limit=5');
     myUpdates.value = (u && u.data) || [];
-    unreadCount.value = (un && un.unread) || 0;
-  } catch (e) {
-    myUpdates.value = [];
-  }
+    if (!userStore.viewer) {
+      const un = await api.get('/watch/updates/unread?limit=1').catch(() => ({ unread: 0 }));
+      unreadCount.value = (un && un.unread) || 0;
+    } else {
+      unreadCount.value = 0;
+    }
+  } catch (e) { myUpdates.value = []; }
   updatesLoading.value = false;
 }
+
 
 const exportOptions = [
   { label: '导出 JSON', key: 'json' },
@@ -241,7 +242,7 @@ watch(() => route.query.tag, (v) => {
           <span class="upd-title">📣 你追的番有更新</span>
           <n-tag v-if="unreadCount" size="small" type="error" round :bordered="false">{{ unreadCount }} 条未读</n-tag>
           <span class="spacer"></span>
-          <n-button text type="primary" size="small" @click="markAllRead">全部已读</n-button>
+          <n-button v-if="!userStore.viewer" text type="primary" size="small" @click="markAllRead">全部已读</n-button>
           <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
         </div>
         <div class="upd-list">
@@ -295,9 +296,9 @@ watch(() => route.query.tag, (v) => {
     </template>
 
     <!-- 导入进度弹窗：不可关闭，避免导入中断 -->
-    <n-modal :show="!!importJob" preset="card" title="正在导入 Bangumi 收藏" :mask-closable="false" :close-on-esc="false" style="width:460px;max-width:92vw">
+    <n-modal :show="!!importJob" preset="card" :title="(importJob && importJob.kind === 'export') ? '正在推送本地收藏到 Bangumi' : '正在同步 Bangumi 收藏'" :mask-closable="false" :close-on-esc="false" style="width:460px;max-width:92vw">
       <div class="import-box" v-if="importJob">
-        <p class="muted import-tip">正在从 Bangumi 拉取收藏并写入本地数据库，收藏较多时可能需要 1-3 分钟，请勿关闭页面。</p>
+        <p class="muted import-tip">{{ (importJob && importJob.kind === 'export') ? '正在把本地收藏逐条推送到你的 Bangumi 账号，请勿关闭页面。' : '正在从 Bangumi 拉取收藏并写入本地数据库，收藏较多时可能需要 1-3 分钟，请勿关闭页面。' }}</p>
         <n-progress type="line" :percentage="importPercent" :show-indicator="true" :processing="importJob.running" />
         <p class="muted import-done">{{ importDoneText }}</p>
       </div>

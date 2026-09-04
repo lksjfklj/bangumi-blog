@@ -8,15 +8,20 @@ function randomToken() {
 }
 
 // kind: 'user' 普通会话（含 Bangumi/本地账号）| 'viewer' 站长只读访客会话
-async function createSession(userId, kind = 'user') {
+async function createSession(userId, kind = 'user', ttlMs = config.sessionTtlMs) {
   const token = randomToken();
-  const expiresAt = Date.now() + config.sessionTtlMs;
+  const expiresAt = Date.now() + ttlMs;
   await pool.query('INSERT INTO sessions (token, user_id, kind, expires_at) VALUES (?, ?, ?, ?)', [token, userId, kind, expiresAt]);
   return { token, expiresAt };
 }
 
 async function deleteSession(token) {
   await pool.query('DELETE FROM sessions WHERE token = ?', [token]);
+}
+// 清理所有已过期会话（启动时 + 定时调用），防止 sessions 表无限膨胀；返回删除的行数
+async function cleanupExpiredSessions(now = Date.now()) {
+  const [r] = await pool.query('DELETE FROM sessions WHERE expires_at <= ?', [now]);
+  return (r && r.affectedRows) || 0;
 }
 
 // 返回用户行，并附带 session_kind（'user' | 'viewer'）
@@ -59,4 +64,4 @@ function requireAdmin(req, res, next) {
   return requireOwner(req, res, next);
 }
 
-module.exports = { createSession, deleteSession, getUserBySession, requireAuth, requireAdmin, requireOwner, requireNotViewer, randomToken };
+module.exports = { createSession, deleteSession, cleanupExpiredSessions, getUserBySession, requireAuth, requireAdmin, requireOwner, requireNotViewer, randomToken };

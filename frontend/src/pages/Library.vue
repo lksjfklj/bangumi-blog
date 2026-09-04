@@ -4,9 +4,11 @@ import { useRoute, useRouter } from 'vue-router';
 import { NInput, NSelect, NButton, NPagination, NSpin, NEmpty, NAlert } from 'naive-ui';
 import { api, img } from '../api';
 import SubjectCard from '../components/SubjectCard.vue';
+import { useUserStore } from '../stores/user';
 
 const route = useRoute();
 const router = useRouter();
+const userStore = useUserStore();
 
 // 番剧库：番剧（Bangumi 网页榜单）/ 漫画、轻小说、Galgame·视觉小说（本地全量同步库）
 const mode = ref('browse'); // browse | search
@@ -458,7 +460,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
         <span class="muted">（{{ (libStatus.lastSync.at || '').replace('T', ' ').slice(0, 16) }}）</span>
       </span>
       <span v-else>⚠️ 本地内容库同步失败或尚未完成</span>
-      <button class="sync-btn" :disabled="libStatus.syncing" @click="triggerSync">重新同步</button>
+      <button v-if="userStore.isOwner" class="sync-btn" :disabled="libStatus.syncing" @click="triggerSync">重新同步</button>
     </div>
 
     <div class="hot-row">

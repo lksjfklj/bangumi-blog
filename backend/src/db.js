@@ -33,10 +33,23 @@ CREATE TABLE IF NOT EXISTS users (
   token_expires_at INTEGER DEFAULT 0,
   password_hash TEXT,
   is_owner INTEGER DEFAULT 0,
+  email TEXT DEFAULT NULL,
+  email_verified_at INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_local_username ON users(username) WHERE password_hash IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS email_verify_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  code TEXT NOT NULL,
+  purpose TEXT DEFAULT 'register',
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_verify_codes(email, purpose, used_at);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
@@ -323,7 +336,48 @@ CREATE TABLE IF NOT EXISTS bgm_book_release_calendar (
 );
 CREATE INDEX IF NOT EXISTS idx_bgm_book_cal_cat_date ON bgm_book_release_calendar(category, date);
 `
-  }
+  },
+  {
+    id: 8,
+    name: 'email-register-v8',
+    sql: `
+CREATE TABLE IF NOT EXISTS email_verify_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  code TEXT NOT NULL,
+  purpose TEXT DEFAULT 'register',
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_email_codes_lookup ON email_verify_codes(email, purpose, used_at);
+`,
+    fn: () => {
+      ensureColumn('users', 'email', 'email TEXT DEFAULT NULL');
+      ensureColumn('users', 'email_verified_at', 'email_verified_at INTEGER DEFAULT 0');
+    }
+  },
+  {
+    id: 9,
+    name: 'security-persist-v9',
+    sql: `
+CREATE TABLE IF NOT EXISTS collection_sync_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL UNIQUE,
+  kind TEXT NOT NULL DEFAULT 'import',
+  status TEXT NOT NULL DEFAULT 'queued',
+  error TEXT DEFAULT '',
+  enqueued_at INTEGER DEFAULT 0,
+  started_at INTEGER DEFAULT 0,
+  finished_at INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sync_req_status ON collection_sync_requests(status, enqueued_at);
+`,
+    fn: () => {
+      ensureColumn('users', 'last_collection_sync_at', 'last_collection_sync_at INTEGER DEFAULT 0');
+      ensureColumn('email_verify_codes', 'fail_count', 'fail_count INTEGER DEFAULT 0');
+    }
+  },
 ];
 
 function runMigrations() {

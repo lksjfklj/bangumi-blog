@@ -8,8 +8,8 @@ const routes = [
   { path: '/watch', name: 'watch', component: () => import('./pages/Watch.vue'), meta: { title: '新番更新' } },
   { path: '/subject/:id', name: 'subject', component: () => import('./pages/SubjectDetail.vue') },
   { path: '/collection', name: 'collection', component: () => import('./pages/Collections.vue'), meta: { title: '我的追番', auth: true } },
-  { path: '/stats', name: 'stats', component: () => import('./pages/Stats.vue'), meta: { title: '追番统计', auth: true } },
-  { path: '/notify', name: 'notify', component: () => import('./pages/Notifications.vue'), meta: { title: '通知设置', auth: true } },
+  { path: '/stats', name: 'stats', component: () => import('./pages/Stats.vue'), meta: { title: '追番统计', auth: true, noViewer: true } },
+  { path: '/notify', name: 'notify', component: () => import('./pages/Notifications.vue'), meta: { title: '通知设置', auth: true, noViewer: true } },
   { path: '/share/:uid', name: 'share', component: () => import('./pages/Share.vue') },
   { path: '/announcements', name: 'announcements', component: () => import('./pages/Announcements.vue'), meta: { title: '公告' } },
   { path: '/blog', name: 'blog', component: () => import('./pages/Blog.vue'), meta: { title: '博客' } },
@@ -34,6 +34,8 @@ router.beforeEach(async (to) => {
   if (to.meta.auth && !userStore.isLoggedIn) {
     return { path: '/login', query: { redirect: to.fullPath } };
   }
+  // 只读访客：统计页 / 通知设置页会请求受保护接口（403），直接引导回首页
+  if (to.meta.noViewer && userStore.viewer) return '/';
   // 仅站长可进（博客管理）
   if (to.meta.owner && !userStore.isOwner) {
     return userStore.isLoggedIn ? '/' : { path: '/login', query: { redirect: to.fullPath } };

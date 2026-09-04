@@ -6,7 +6,7 @@ const fs = require('fs');
 const cookieParser = require('cookie-parser');
 const config = require('./config');
 const { initDb } = require('./db');
-const { getUserBySession } = require('./auth');
+const { getUserBySession, cleanupExpiredSessions } = require('./auth');
 const { securityHeaders, originGuard, rateLimit } = require('./security');
 const logger = require('./logger');
 
@@ -107,6 +107,12 @@ app.get('/api/health', async (req, res, next) => {
       const [rows] = await pool.query('SELECT 1 AS ok');
       dbOk = !!(rows && rows[0] && rows[0].ok === 1);
     } catch (e) { dbOk = false; }
+    res.set('Cache-Control', 'no-store');
+    const isOwner = !!(req.user && req.user.kind !== 'viewer' && +req.user.is_owner === 1);
+    if (!isOwner) {
+      // 非站长（匿名/普通用户/只读访客）：只暴露可用性，不泄露内部抓取状态与进程信息
+      return res.json({ ok: dbOk, time: Date.now(), uptime: Math.floor(process.uptime()), db: dbOk ? 'ok' : 'error' });
+    }
     const [newsS, watchS, libS] = await Promise.all([
       Promise.resolve(news.getStatus ? news.getStatus() : null),
       Promise.resolve(watch.getStatus ? watch.getStatus() : null),
@@ -116,7 +122,6 @@ app.get('/api/health', async (req, res, next) => {
     if (!dbOk) problems.push('db');
     if (newsS && newsS.lastError) problems.push('news:' + newsS.lastError);
     if (watchS && watchS.lastError) problems.push('watch:' + watchS.lastError);
-    res.set('Cache-Control', 'no-store');
     res.json({
       ok: problems.length === 0,
       time: Date.now(),
@@ -168,6 +173,25 @@ app.use((err, req, res, next) => {
   try {
     await initDb();
     logger.info('[db] schema ready');
+    // 过期会话清理：启动先清一次，之后定时清理（防 sessions 表无限膨胀 / 会话永不过期）
+    try {
+      const removed = await cleanupExpiredSessions();
+      if (removed) logger.info('[sessions] cleanup removed', { removed });
+    } catch (e) {
+      logger.error('[sessions] startup cleanup failed', { message: e.message });
+    }
+    setInterval(() => {
+      cleanupExpiredSessions()
+        .then(removed => { if (removed) logger.info('[sessions] cleanup removed', { removed }); })
+        .catch(e => logger.error('[sessions] cleanup failed', { message: e.message }));
+    }, config.sessionCleanupIntervalMs).unref();
+    // 同步队列崩溃恢复：把上次进程中断的 Bangumi 同步任务重新入队（任务已持久化到 DB，不丢）
+    try {
+      const collectionsRoute = require('./routes/collections');
+      if (typeof collectionsRoute.initSyncQueue === 'function') await collectionsRoute.initSyncQueue();
+    } catch (e) {
+      logger.error('[collections] queue recovery failed', { message: e.message });
+    }
   } catch (e) {
     logger.error('[db] init failed', { message: e.message });
   }

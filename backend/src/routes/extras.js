@@ -2,7 +2,7 @@
 // routes/extras.js - 追番统计 / 公开分享 / 收藏导出 / 个人资料公开设置 / 放送日历 ICS
 const express = require('express');
 const { pool } = require('../db');
-const { requireAuth } = require('../auth');
+const { requireNotViewer } = require('../auth');
 const { bgm, cached } = require('../bangumi');
 const config = require('../config');
 const router = express.Router();
@@ -27,7 +27,7 @@ function colTimeMs(c) {
 
 // ---------- 放送日历·收藏进度 ----------
 // GET /api/me/calendar-progress  返回 { [subject_id]: { ep_status, status } }（仅动画收藏）
-router.get('/me/calendar-progress', requireAuth, async (req, res, next) => {
+router.get('/me/calendar-progress', requireNotViewer, async (req, res, next) => {
   try {
     const [rows] = await pool.query(
       "SELECT subject_id, ep_status, status FROM collections WHERE user_id = ? AND subject_type = 2",
@@ -41,7 +41,7 @@ router.get('/me/calendar-progress', requireAuth, async (req, res, next) => {
 });
 // ---------- 追番统计页 ----------
 // GET /api/collections/stats?year=2026
-router.get('/collections/stats', requireAuth, async (req, res, next) => {
+router.get('/collections/stats', requireNotViewer, async (req, res, next) => {
   try {
     const uid = req.user.id;
     const year = Math.max(2000, Math.min(2100, +req.query.year || new Date().getFullYear()));
@@ -119,7 +119,7 @@ router.get('/collections/stats', requireAuth, async (req, res, next) => {
 
 // ---------- 个人资料公开设置 ----------
 // PUT /api/profile/public  { profile_public?: bool, bio?: string }
-router.put('/profile/public', requireAuth, async (req, res, next) => {
+router.put('/profile/public', requireNotViewer, async (req, res, next) => {
   try {
     const body = req.body || {};
     const cur = req.user;
@@ -177,7 +177,7 @@ router.get('/share/:uid', async (req, res, next) => {
 
 // ---------- 收藏数据导出备份 ----------
 // GET /api/collections/export-download?format=json|csv
-router.get('/collections/export-download', requireAuth, async (req, res, next) => {
+router.get('/collections/export-download', requireNotViewer, async (req, res, next) => {
   try {
     const fmt = String(req.query.format || 'json').toLowerCase() === 'csv' ? 'csv' : 'json';
     const [rows] = await pool.query(

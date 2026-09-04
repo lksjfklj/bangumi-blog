@@ -2,7 +2,11 @@
 // routes/watchupdates.js - 追番新话更新·未读/已读（updatepusher 落库后供前端角标与列表使用）
 const express = require('express');
 const { pool } = require('../db');
+const { requireNotViewer } = require('../auth');
 const router = express.Router();
+
+// 更新通知属私人数据（未读/已读状态），只读访客一律 403
+router.use(requireNotViewer);
 
 // 未读列表：GET /api/watch/updates/unread?limit=100
 router.get('/updates/unread', async (req, res, next) => {

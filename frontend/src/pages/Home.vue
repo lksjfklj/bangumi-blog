@@ -49,10 +49,20 @@ onMounted(() => {
   const p2 = api.get('/blog/posts?size=4').then(d => { posts.value = d.data || []; }).catch(() => { /* ignore */ })
     .finally(() => { postsLoading.value = false; });
   const p3 = userStore.isLoggedIn
-    ? Promise.all([
-        api.get('/watch/my-updates?limit=5').then(d => { myUpdates.value = d.data || []; }).catch(() => { myUpdates.value = []; }),
-        api.get('/me/calendar-progress').then(d => { progressMap.value = d || {}; }).catch(() => { progressMap.value = {}; })
-      ]).finally(() => { loadingMy.value = false; })
+    ? (async () => {
+        // 只读访客也可看「我追的更了」（站长追番数据只读公开）；追番进度属个人数据仅登录用户可看
+        try {
+          const u = await api.get('/watch/my-updates?limit=5');
+          myUpdates.value = (u && u.data) || [];
+        } catch (e) { myUpdates.value = []; }
+        if (!userStore.viewer) {
+          try {
+            const d = await api.get('/me/calendar-progress');
+            progressMap.value = d || {};
+          } catch (e) { progressMap.value = {}; }
+        }
+        loadingMy.value = false;
+      })()
     : Promise.resolve();
   Promise.all([p1, p2, p3]);
 });

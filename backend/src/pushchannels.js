@@ -5,6 +5,7 @@
 const config = require('./config');
 const webpush = require('./webpush');
 const logger = require('./logger');
+const dns = require('dns');
 const { pool } = require('./db');
 
 // 读用户通知设置 + Web Push 订阅
@@ -23,6 +24,57 @@ async function getUserNotifySettings(userId) {
   return settings;
 }
 
+// ---------- Webhook SSRF 防护 ----------
+// 拒绝回环 / 私网 / 链路本地 / 云元数据 / 组播保留等地址（含 IPv4/IPv6 字面量与 localhost），
+// 域名类型发送前还会再做一次 DNS 解析校验，防止解析到内网地址
+function isPrivateHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) {
+    const p = h.split('.').map(Number);
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127) return true;
+    if (p[0] === 169 && p[1] === 254) return true;        // 链路本地
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true; // 私网 172.16/12
+    if (p[0] === 192 && p[1] === 168) return true;        // 私网 192.168/16
+    if (p[0] >= 224) return true;                         // 组播/保留
+    return false;
+  }
+  if (h.includes(':')) {
+    if (h === '::' || h === '::1') return true;                                  // 未指定/回环
+    if (/^fe80:/i.test(h) || /^fc/i.test(h) || /^fd/i.test(h)) return true;      // 链路本地/ULA
+    if (/^2001:db8:/i.test(h)) return true;                                      // 文档段
+    const emb = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);                // IPv4 映射
+    if (emb) return isPrivateHost(emb[1]);
+    return false;
+  }
+  return false; // 普通域名暂放行，发送前按 DNS 解析结果二次校验
+}
+
+// 保存阶段同步校验：格式 + 协议 + 字面量地址
+function isSafeWebhookUrl(raw) {
+  let u;
+  try { u = new URL(String(raw || '')); } catch (e) { return false; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+  return !isPrivateHost(u.hostname);
+}
+
+// 发送阶段异步二次校验：域名解析后任一 IP 命中私网/回环即拒绝
+async function isSafeWebhookResolved(raw) {
+  if (!isSafeWebhookUrl(raw)) return false;
+  const hostname = new URL(String(raw)).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const isDomain = !/^\d+\.\d+\.\d+\.\d+$/.test(hostname) && !hostname.includes(':');
+  if (!isDomain) return true; // 已是公网 IP 字面量
+  try {
+    const addrs = await dns.promises.lookup(hostname, { all: true });
+    if (!addrs || !addrs.length) return false;
+    return addrs.every(a => !isPrivateHost(a.address));
+  } catch (e) {
+    // DNS 解析失败：放行交给 fetch（会自然失败），避免因临时 DNS 抖动误伤
+    return true;
+  }
+}
+
 // 校验用户可配置字段（白名单 + 长度/格式限制），非法字段丢弃
 function sanitizeSettings(body) {
   const out = {};
@@ -37,7 +89,9 @@ function sanitizeSettings(body) {
   }
   if (typeof body.webhook === 'string') {
     const v = body.webhook.trim().slice(0, 500);
-    if (!v || /^https?:\/\/.+/.test(v)) out.webhook = v;
+    if (!v) out.webhook = '';
+    else if (/^https?:\/\/.+/.test(v) && isSafeWebhookUrl(v)) out.webhook = v;
+    else out.webhook = ''; // 内网/回环/异常地址一律丢弃并清空，禁止保存
   }
   if (typeof body.email === 'string') {
     const v = body.email.trim().slice(0, 200).toLowerCase();
@@ -86,13 +140,17 @@ async function sendToUser(user, settings, payload) {
   // 3) 通用 Webhook
   if (c.webhook) {
     try {
-      const res = await fetch(c.webhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, body, url }),
-        signal: AbortSignal.timeout(10000)
-      });
-      results.push({ channel: 'webhook', ok: res.ok });
+      if (!(await isSafeWebhookResolved(c.webhook))) {
+        results.push({ channel: 'webhook', ok: false, error: 'blocked unsafe webhook url' });
+      } else {
+        const res = await fetch(c.webhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, body, url }),
+          signal: AbortSignal.timeout(10000)
+        });
+        results.push({ channel: 'webhook', ok: res.ok });
+      }
     } catch (e) {
       results.push({ channel: 'webhook', ok: false, error: e.message });
     }

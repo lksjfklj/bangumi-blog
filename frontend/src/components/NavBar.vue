@@ -32,11 +32,12 @@ const activeKey = computed(() => {
 });
 
 const userOptions = computed(() => {
-  const opts = [
-    { label: '我的追番', key: '/collection' },
-    { label: '📊 追番统计', key: '/stats' },
-    { label: '🔔 通知设置', key: '/notify' }
-  ];
+  const opts = [{ label: '我的追番', key: '/collection' }];
+  // 只读访客看不到会 403 的站内管理页（追番统计/通知设置），只保留浏览类入口
+  if (!userStore.viewer) {
+    opts.push({ label: '📊 追番统计', key: '/stats' });
+    opts.push({ label: '🔔 通知设置', key: '/notify' });
+  }
   if (userStore.isOwner) opts.push({ label: '站务管理', key: '/admin' });
   opts.push({ label: '切换账号 / 访客', key: '/login' });
   opts.push({ label: '退出登录', key: 'logout' });
@@ -81,7 +82,7 @@ onUnmounted(() => clearInterval(unreadTimer));
         <router-link v-for="n in nav" :key="n.to" :to="n.to" :class="{ on: activeKey === n.to }">{{ n.label }}</router-link>
       </nav>
       <div class="spacer"></div>
-      <button v-if="userStore.user" class="bell-btn" title="新话更新通知" @click="router.push('/notify')">
+      <button v-if="userStore.user && !userStore.viewer" class="bell-btn" title="新话更新通知" @click="router.push('/notify')">
         🔔<span v-if="unread" class="bell-badge">{{ unread > 99 ? '99+' : unread }}</span>
       </button>
       <button class="theme-toggle" :title="themeStore === 'gensokyo' ? '切换到红魔馆·浅色复古' : '切换到秘封之夜·深色东方'" @click="toggleTheme">

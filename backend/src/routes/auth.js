@@ -5,10 +5,13 @@ const config = require('../config');
 const { pool } = require('../db');
 const { oauthAuthorizeUrl, oauthExchange, bgm, getValidToken } = require('../bangumi');
 const { createSession, deleteSession, getUserBySession } = require('../auth');
+const { clientIpOf } = require('../security');
 const router = express.Router();
 
 // ---------- 密码哈希（scrypt，随机盐） ----------
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
+// 用户不存在时用于对齐 scrypt 耗时的假哈希（内容无意义，仅用于计时防枚举）
+const DUMMY_STORED = 'scrypt$' + '0'.repeat(32) + '$' + '0'.repeat(128);
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -27,9 +30,9 @@ function verifyPassword(password, stored) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function setSid(res, token) {
+function setSid(res, token, ttlMs = config.sessionTtlMs) {
   // SameSite=strict + HttpOnly：本站是纯同源 SPA，杜绝跨站携带会话 Cookie（CSRF 主防线之一）
-  res.cookie('sid', token, { httpOnly: true, sameSite: 'strict', secure: config.secureCookies, maxAge: config.sessionTtlMs });
+  res.cookie('sid', token, { httpOnly: true, sameSite: 'strict', secure: config.secureCookies, maxAge: ttlMs });
 }
 
 // 是否站长（Bangumi UID 匹配或已标记 is_owner）
@@ -99,8 +102,7 @@ router.get('/callback', async (req, res, next) => {
 // ---------- 简单内存限流（按 IP，防爆破） ----------
 const rateBuckets = new Map(); // ip -> [{ t, kind }]
 function clientIp(req) {
-  const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+  return clientIpOf(req);
 }
 function checkRate(req, kind, limit, windowMs) {
   const ip = clientIp(req);
@@ -115,26 +117,126 @@ function checkRate(req, kind, limit, windowMs) {
 }
 
 // ---------- 本地账号 ----------
-// 注册
+// 邮箱格式校验
+function validEmail(v) {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v || '').trim());
+}
+
+// 发送邮箱注册验证码（邮件由 SMTP 发送；未配置 SMTP 时返回 503）
+router.post('/mail/request-code', async (req, res, next) => {
+  try {
+    if (!checkRate(req, 'mail_code', 3, 10 * 60 * 1000)) {
+      return res.status(429).json({ error: '验证码请求过于频繁，请 10 分钟后再试' });
+    }
+    const email = String(((req.body || {}).email) || '').trim().toLowerCase();
+    if (!validEmail(email)) return res.status(400).json({ error: '邮箱格式不正确' });
+    if (!config.smtp.host || !config.smtp.user) {
+      return res.status(503).json({ error: '服务器尚未配置 SMTP，暂无法发送邮箱验证码' });
+    }
+    const [dup] = await pool.query('SELECT id FROM users WHERE email = ? AND password_hash IS NOT NULL', [email]);
+    if (dup.length) return res.status(409).json({ error: '该邮箱已被注册，请直接登录' });
+    // M3：同一邮箱每 10 分钟最多发送 1 封验证码（以 DB 记录为准，重启后仍生效）
+    const cutoff10 = new Date(Date.now() - 10 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    const [recent] = await pool.query(
+      'SELECT COUNT(*) AS n FROM email_verify_codes WHERE email = ? AND purpose = ? AND created_at >= ?',
+      [email, 'register', cutoff10]
+    );
+    if (recent[0].n > 0) {
+      return res.status(429).json({ error: '该邮箱验证码请求过于频繁，请 10 分钟后再试' });
+    }
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const now = Date.now();
+    // 先使该邮箱旧的未用验证码全部失效，避免多个验证码并存造成混淆
+    await pool.query(
+      "UPDATE email_verify_codes SET used_at = ? WHERE email = ? AND purpose = 'register' AND used_at = 0",
+      [now, email]
+    );
+    await pool.query(
+      "INSERT INTO email_verify_codes (email, code, purpose, expires_at, used_at, created_at) VALUES (?, ?, 'register', ?, 0, ?)",
+      [email, code, now + config.mailCodeTtlMs, now]
+    );
+    try {
+      const nodemailer = require('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: config.smtp.host,
+        port: config.smtp.port,
+        secure: config.smtp.secure,
+        auth: config.smtp.user ? { user: config.smtp.user, pass: config.smtp.pass } : undefined
+      });
+      await transporter.sendMail({
+        from: config.smtp.from || config.smtp.user,
+        to: email,
+        subject: '【秘封俱乐部】注册验证码',
+        text: '你的注册验证码是：' + code + '（' + Math.round(config.mailCodeTtlMs / 60000) + ' 分钟内有效）。如果不是你本人操作，请忽略本邮件。'
+      });
+    } catch (e) {
+      // 发送失败则作废刚生成的验证码，避免被猜到后用
+      await pool.query(
+        "UPDATE email_verify_codes SET used_at = ? WHERE email = ? AND purpose = 'register' AND code = ?",
+        [Date.now(), email, code]
+      );
+      console.error('[auth] send register mail failed', email, ':', e && e.message);
+      return res.status(502).json({ error: '验证码邮件发送失败，请稍后再试' });
+    }
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// 注册（需邮箱验证码，防止匿名批量注册/占用户名）
 router.post('/register', async (req, res, next) => {
   try {
     if (!checkRate(req, 'register', 5, 10 * 60 * 1000)) {
       return res.status(429).json({ error: '注册过于频繁，请稍后再试' });
     }
-    const { username, password, nickname } = req.body || {};
+    const { username, password, nickname, email, code } = req.body || {};
     const name = String(username || '').trim();
     const pwd = String(password || '');
+    const mail = String(email || '').trim().toLowerCase();
+    const veri = String(code || '').trim();
     if (!/^[A-Za-z0-9_\u4e00-\u9fa5]{2,24}$/.test(name)) {
       return res.status(400).json({ error: '用户名需为 2-24 位字母/数字/下划线/中文' });
     }
-    if (pwd.length < 6 || pwd.length > 72) {
-      return res.status(400).json({ error: '密码长度需为 6-72 位' });
+    if (pwd.length < 8 || pwd.length > 72) {
+      return res.status(400).json({ error: '密码长度需为 8-72 位' });
     }
-    const [dup] = await pool.query('SELECT id FROM users WHERE username = ? AND password_hash IS NOT NULL', [name]);
-    if (dup.length) return res.status(409).json({ error: '用户名已被占用' });
+    if (!validEmail(mail)) return res.status(400).json({ error: '请填写正确的邮箱' });
+    if (!/^\d{6}$/.test(veri)) return res.status(400).json({ error: '请填写 6 位邮箱验证码' });
+    const [codes] = await pool.query(
+      "SELECT * FROM email_verify_codes WHERE email = ? AND purpose = 'register' AND used_at = 0 ORDER BY id DESC LIMIT 1",
+      [mail]
+    );
+    const row = codes[0];
+    if (!row || row.expires_at <= Date.now()) {
+      return res.status(400).json({ error: '验证码错误或已过期，请重新获取' });
+    }
+    if (row.code !== veri) {
+      // M3：校验失败计数，连续错 5 次作废该验证码，防爆破 6 位数字验证码
+      const fails = +(row.fail_count || 0) + 1;
+      await pool.query('UPDATE email_verify_codes SET fail_count = ? WHERE id = ?', [fails, row.id]);
+      if (fails >= 5) {
+        await pool.query('UPDATE email_verify_codes SET used_at = ?, fail_count = ? WHERE id = ? AND used_at = 0', [Date.now(), fails, row.id]);
+        return res.status(429).json({ error: '验证码错误次数过多，验证码已作废，请重新获取' });
+      }
+      return res.status(400).json({ error: '验证码错误或已过期，请重新获取' });
+    }
+    const [dupUser] = await pool.query(
+      'SELECT id FROM users WHERE (username = ? OR LOWER(username) = LOWER(?)) AND password_hash IS NOT NULL',
+      [name, name]
+    );
+    if (dupUser.length) return res.status(409).json({ error: '用户名已被占用' });
+    const [dupMail] = await pool.query(
+      'SELECT id FROM users WHERE email = ? AND password_hash IS NOT NULL',
+      [mail]
+    );
+    if (dupMail.length) return res.status(409).json({ error: '该邮箱已被注册，请直接登录' });
+    const [upd] = await pool.query(
+      'UPDATE email_verify_codes SET used_at = ? WHERE id = ? AND used_at = 0',
+      [Date.now(), row.id]
+    );
+    if (!upd.affectedRows) return res.status(400).json({ error: '验证码已被使用，请重新获取' });
     const [ins] = await pool.query(
-      'INSERT INTO users (username, nickname, password_hash, is_owner) VALUES (?, ?, ?, 0)',
-      [name, String(nickname || '').trim().slice(0, 32) || name, hashPassword(pwd)]
+      'INSERT INTO users (username, nickname, password_hash, email, email_verified_at, is_owner) VALUES (?, ?, ?, ?, ?, 0)',
+      [name, String(nickname || '').trim().slice(0, 32) || name, hashPassword(pwd), mail, Date.now()]
     );
     const { token } = await createSession(ins.insertId, 'user');
     setSid(res, token);
@@ -151,7 +253,12 @@ router.post('/login', async (req, res, next) => {
     const { username, password } = req.body || {};
     const name = String(username || '').trim();
     const [rows] = await pool.query('SELECT * FROM users WHERE username = ? AND password_hash IS NOT NULL', [name]);
-    if (!rows.length || !verifyPassword(String(password || ''), rows[0].password_hash)) {
+    if (!rows.length) {
+      // L1：用户不存在也执行一次 scrypt，耗时与“密码错误”对齐，防止枚举本地账号
+      verifyPassword(String(password || ''), DUMMY_STORED);
+      return res.status(401).json({ error: '用户名或密码错误' });
+    }
+    if (!verifyPassword(String(password || ''), rows[0].password_hash)) {
       return res.status(401).json({ error: '用户名或密码错误' });
     }
     const user = rows[0];
@@ -166,11 +273,15 @@ router.post('/login', async (req, res, next) => {
 // 不登录，以站长身份进入只读浏览（写接口一律 403）
 router.post('/viewer', async (req, res, next) => {
   try {
+    // H2：viewer 会话按真实来源 IP 限流（每 10 分钟 5 次），防止被刷出大量只读会话
+    if (!checkRate(req, 'viewer', 5, 10 * 60 * 1000)) {
+      return res.status(429).json({ error: '访问过于频繁，请 10 分钟后再试' });
+    }
     const [rows] = await pool.query('SELECT * FROM users WHERE is_owner = 1 ORDER BY id LIMIT 1');
     if (!rows.length) return res.status(400).json({ error: '尚未初始化站长账号' });
     const owner = rows[0];
-    const { token } = await createSession(owner.id, 'viewer');
-    setSid(res, token);
+    const { token } = await createSession(owner.id, 'viewer', config.viewerSessionTtlMs);
+    setSid(res, token, config.viewerSessionTtlMs);
     res.json({ ok: true, viewer: true, user: {
       id: owner.id,
       bangumi_uid: owner.bangumi_uid,

@@ -38,3 +38,25 @@ test('originOf: 从 Origin/Referer 解析 host', () => {
   assert.equal(originOf(req({})), '');
   assert.equal(originOf(req({ origin: 'not-a-url' })), '');
 });
+
+// XFF 伪造防护：取最右一段可信来源 IP
+const { clientIpOf } = require('../src/security');
+
+test('clientIpOf: 无 XFF 时回退 socket 地址', () => {
+  assert.equal(clientIpOf({ headers: {}, socket: { remoteAddress: '1.2.3.4' } }), '1.2.3.4');
+});
+
+test('clientIpOf: 单段 XFF 直接返回（nginx 已覆盖为 $remote_addr 的场景）', () => {
+  const req = { headers: { 'x-forwarded-for': '203.0.113.9' }, socket: { remoteAddress: '127.0.0.1' } };
+  assert.equal(clientIpOf(req), '203.0.113.9');
+});
+
+test('clientIpOf: 多段 XFF 取最右一段，忽略客户端伪造的前缀', () => {
+  const req = { headers: { 'x-forwarded-for': '1.2.3.4, 198.51.100.7' }, socket: { remoteAddress: '127.0.0.1' } };
+  assert.equal(clientIpOf(req), '198.51.100.7');
+});
+
+test('clientIpOf: 空 XFF 回退 socket', () => {
+  const req = { headers: { 'x-forwarded-for': '' }, socket: { remoteAddress: '::1' } };
+  assert.equal(clientIpOf(req), '::1');
+});

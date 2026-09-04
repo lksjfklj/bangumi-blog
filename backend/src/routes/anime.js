@@ -255,13 +255,13 @@ router.get('/library/status', async (req, res, next) => {
   }
 });
 // VNDB 元数据回填（galgame 增强源）状态/进度/人工复查清单
-router.get('/library/enrich/vndb/status', async (req, res, next) => {
+router.get('/library/enrich/vndb/status', requireOwner, async (req, res, next) => {
   try { res.json(await vndbStatus()); } catch (e) { next(e); }
 });
 // 手动触发 VNDB 元数据回填（幂等、可续跑）：
 //   dryRun=true 只试跑不写库（建议配 limit）；limit=N 处理够 N 个条目即暂停返回；
 //   force=true 无视 30 天宽限期强制重刷；不带参数则整轮后台续跑并立即返回。
-router.post('/library/enrich/vndb', async (req, res, next) => {
+router.post('/library/enrich/vndb', requireOwner, async (req, res, next) => {
   try {
     const body = req.body || {};
     const limit = Math.min(Math.max(+(body.limit) || 0, 0), 5000);
@@ -276,7 +276,7 @@ router.post('/library/enrich/vndb', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/library/sync', async (req, res, next) => {
+router.post('/library/sync', requireOwner, async (req, res, next) => {
   try {
     // 可选 body: { types: [1] | [4] }：只同步书籍或只同步游戏；缺省则两类全量同步
     const result = await runSync({ types: (req.body && req.body.types) || undefined });

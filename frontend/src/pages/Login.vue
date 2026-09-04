@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NInput, NButton, NForm, NFormItem, NMessageProvider, useMessage } from 'naive-ui';
+import { NInput, NButton, NForm, NFormItem, useMessage } from 'naive-ui';
+import { api } from '../api';
 import { useUserStore } from '../stores/user';
 
 const route = useRoute();
@@ -13,9 +14,12 @@ const redirect = String(route.query.redirect || '/');
 const switching = computed(() => route.query.switch === '1' && userStore.isLoggedIn);
 const mode = ref('login'); // login | register
 
-const form = ref({ username: '', password: '', nickname: '', password2: '' });
+const form = ref({ username: '', password: '', nickname: '', email: '', code: '', password2: '' });
 const submitting = ref(false);
 const viewerLoading = ref(false);
+const mailSending = ref(false);
+const mailCd = ref(0);
+let mailTimer = null;
 
 const errorText = ref('');
 
@@ -41,19 +45,47 @@ async function doLogin() {
   submitting.value = false;
 }
 
+function startMailCountdown(sec) {
+  mailCd.value = sec;
+  if (mailTimer) clearInterval(mailTimer);
+  mailTimer = setInterval(() => {
+    mailCd.value--;
+    if (mailCd.value <= 0) { clearInterval(mailTimer); mailTimer = null; }
+  }, 1000);
+}
+
+async function sendCode() {
+  const email = form.value.email.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { message.warning('请先填写正确的邮箱'); return; }
+  if (mailCd.value > 0 || mailSending.value) return;
+  mailSending.value = true;
+  errorText.value = '';
+  try {
+    await api.post('/auth/mail/request-code', { email });
+    message.success('验证码已发送到 ' + email + '，请查收邮件');
+    startMailCountdown(60);
+  } catch (e) { errorText.value = e.message || '验证码发送失败'; }
+  mailSending.value = false;
+}
+
+onUnmounted(() => { if (mailTimer) clearInterval(mailTimer); });
+
 async function doRegister() {
-  if (!form.value.username.trim() || !form.value.password) { message.warning('请输入用户名和密码'); return; }
-  if (form.value.password !== form.value.password2) { message.warning('两次输入的密码不一致'); return; }
+  const f = form.value;
+  if (!f.username.trim() || !f.password) { message.warning('请输入用户名和密码'); return; }
+  if (f.password.length < 8) { message.warning('密码长度至少 8 位'); return; }
+  if (f.password !== f.password2) { message.warning('两次输入的密码不一致'); return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email.trim())) { message.warning('请填写正确的邮箱'); return; }
+  if (!/^\d{6}$/.test(f.code.trim())) { message.warning('请填写 6 位邮箱验证码'); return; }
   submitting.value = true;
   errorText.value = '';
   try {
-    await userStore.registerLocal(form.value.username.trim(), form.value.password, form.value.nickname.trim());
+    await userStore.registerLocal(f.username.trim(), f.password, f.nickname.trim(), f.email.trim(), f.code.trim());
     message.success('注册成功，欢迎来到秘封俱乐部');
     go();
   } catch (e) { errorText.value = e.message; }
   submitting.value = false;
 }
-
 async function enterViewer() {
   viewerLoading.value = true;
   errorText.value = '';
@@ -101,8 +133,20 @@ function bgmLogin() { location.href = '/api/auth/bangumi'; }
         <n-form-item v-if="mode === 'register'" label="昵称（可选）">
           <n-input v-model:value="form.nickname" placeholder="展示名字，不填默认用用户名" />
         </n-form-item>
+        <n-form-item v-if="mode === 'register'" label="邮箱">
+          <div class="mail-row">
+            <n-input v-model:value="form.email" placeholder="接收验证码，注册成功后绑定账号" @keyup.enter="sendCode" />
+            <n-button size="small" :loading="mailSending" :disabled="mailCd > 0" @click="sendCode">
+              {{ mailCd > 0 ? mailCd + 's 后可重发' : (mailSending ? '发送中…' : '发送验证码') }}
+            </n-button>
+          </div>
+        </n-form-item>
+        <n-form-item v-if="mode === 'register'" label="验证码">
+          <n-input v-model:value="form.code" maxlength="6" placeholder="6 位数字验证码" @keyup.enter="doRegister" />
+        </n-form-item>
+
         <n-form-item label="密码">
-          <n-input v-model:value="form.password" type="password" show-password-on="click" placeholder="密码（至少 6 位）" @keyup.enter="mode === 'login' ? doLogin() : doRegister()" />
+          <n-input v-model:value="form.password" type="password" show-password-on="click" placeholder="密码（8-72 位）" @keyup.enter="mode === 'login' ? doLogin() : doRegister()" />
         </n-form-item>
         <n-form-item v-if="mode === 'register'" label="确认密码">
           <n-input v-model:value="form.password2" type="password" show-password-on="click" placeholder="再输入一次密码" @keyup.enter="doRegister" />
@@ -169,4 +213,6 @@ function bgmLogin() { location.href = '/api/auth/bangumi'; }
   font-weight: 900; font-size: 13px; margin-right: 8px;
 }
 .foot-note { margin: 14px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.6; text-align: center; }
+.mail-row { display: flex; gap: 8px; align-items: center; width: 100%; }
+.mail-row :deep(.n-input) { flex: 1 1 auto; }
 </style>

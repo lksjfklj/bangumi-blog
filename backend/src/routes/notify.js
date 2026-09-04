@@ -6,14 +6,24 @@
 //  - DELETE /api/notify/push-subscribe    删除订阅
 //  - POST /api/notify/test                给自己发一条测试推送
 const express = require('express');
-const { requireAuth } = require('../auth');
+const { requireNotViewer } = require('../auth');
 const { pool } = require('../db');
 const webpush = require('../webpush');
 const { getUserNotifySettings, sanitizeSettings, sendToUser, hasChannels } = require('../pushchannels');
 const logger = require('../logger');
 const router = express.Router();
 
-router.use(requireAuth);
+router.use(requireNotViewer);
+
+// 测试推送限流：每用户 15 秒最多 1 次（进程内存，仅防手滑刷屏）
+const testRateMap = new Map();
+function checkTestRate(userId) {
+  const now = Date.now();
+  const last = testRateMap.get(userId) || 0;
+  if (now - last < 15000) return Math.ceil((last + 15000 - now) / 1000);
+  testRateMap.set(userId, now);
+  return 0;
+}
 
 router.get('/settings', async (req, res, next) => {
   try {
@@ -82,6 +92,8 @@ router.delete('/push-subscribe', async (req, res, next) => {
 // 给自己发测试推送
 router.post('/test', async (req, res, next) => {
   try {
+    const rateWait = checkTestRate(req.user.id);
+    if (rateWait > 0) return res.status(429).json({ error: '测试推送过于频繁，请稍后再试', retryAfterSec: rateWait });
     const s = await getUserNotifySettings(req.user.id);
     const results = await sendToUser(req.user, s, {
       title: '🔔 新话推送测试',

@@ -69,5 +69,14 @@ module.exports = {
   sessionTtlMs: 30 * 24 * 3600 * 1000,
   publicBase: env.PUBLIC_BASE || 'http://8.134.187.77:8088',
   imgCacheDir: env.IMG_CACHE_DIR || path.join(__dirname, '..', 'img-cache'),
-  enableBlog: env.ENABLE_BLOG !== '0'
+  enableBlog: env.ENABLE_BLOG !== '0',
+  // Bangumi 收藏同步：全局同一时刻只跑 1 个同步任务（排队 FIFO 逐个执行）；
+  // 同一用户两次同步请求之间至少间隔 BGM_SYNC_COOLDOWN_MS（默认 60 秒），防止反复触发打爆 Bangumi 配额
+  bgmSyncCooldownMs: +(env.BGM_SYNC_COOLDOWN_MS || 60000),
+  // 邮箱注册验证码有效期（毫秒），默认 10 分钟
+  mailCodeTtlMs: +(env.MAIL_CODE_TTL_MS || 10 * 60 * 1000),
+  // 只读访客（viewer）会话有效期（毫秒），默认 24 小时（普通用户会话仍为 30 天）
+  viewerSessionTtlMs: +(env.VIEWER_SESSION_TTL_MS || 24 * 3600 * 1000),
+  // 过期会话自动清理定时器间隔（毫秒），默认 30 分钟
+  sessionCleanupIntervalMs: +(env.SESSION_CLEANUP_INTERVAL_MS || 30 * 60 * 1000)
 };

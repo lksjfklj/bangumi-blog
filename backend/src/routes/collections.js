@@ -206,10 +206,143 @@ router.delete('/collections/:subjectId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// 从 Bangumi 导入全部收藏到本地（后台异步任务，避免 6000+ 条同步导入导致请求超时）
-const importJobs = new Map(); // userId -> { running, done, total, expected, currentType, error, startedAt }
+// 从 Bangumi 导入/导出收藏到本地：全局队列（同一时刻只跑 1 个任务）+ 每用户冷却，
+// 避免并发任务把 Bangumi API 与本地 1 核小机打爆；普通用户无法绕过队列无限请求
+const config = require('../config');
+const importJobs = new Map(); // userId -> 内存进度（仅 /collections/import/status 展示用；排队状态以 DB 表为准）
+const importQueue = [];       // 全局等待队列（FIFO）：同一时刻只出队执行一个任务
+let queueRunner = null;       // 队列 worker 单例
+let recoveryStarted = false;  // 崩溃恢复只执行一次（DB 就绪后由 server.js 调用）
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+function setMemoryJob(userId, kind, queued) {
+  importJobs.set(userId, {
+    kind, running: false, queued, done: 0, total: 0, expected: 0, currentType: 0,
+    error: '', startedAt: Date.now()
+  });
+}
+
+async function dbSyncRow(userId) {
+  const [rows] = await pool.query('SELECT * FROM collection_sync_requests WHERE user_id = ?', [userId]);
+  return rows[0] || null;
+}
+
+// 返回该用户剩余冷却毫秒数（0 表示可发起新同步）；计时基于持久化的最近一次同步时间
+async function cooldownRemainMs(userId) {
+  const [rows] = await pool.query('SELECT last_collection_sync_at FROM users WHERE id = ?', [userId]);
+  const last = +(rows[0] && rows[0].last_collection_sync_at) || 0;
+  const remain = last + config.bgmSyncCooldownMs - Date.now();
+  return remain > 0 ? remain : 0;
+}
+
+// 入队校验与登记：已运行/已排队 -> 拒绝；冷却期内 -> 429；否则写入 DB 后再入内存队列
+async function enqueueSync(userId, kind, res) {
+  const existing = importJobs.get(userId);
+  if (existing && (existing.running || existing.queued)) {
+    res.json({ ok: false, reason: 'already queued', error: '已有同步任务在排队，请等待完成后再试' });
+    return false;
+  }
+  const row = await dbSyncRow(userId);
+  if (row && (row.status === 'queued' || row.status === 'running')) {
+    // 内存状态丢失（如进程重启）但 DB 仍有未完成任务：重新入队继续执行
+    if (!existing) setMemoryJob(userId, row.kind || kind, true);
+    importQueue.push({ userId });
+    startQueueWorker();
+    res.json({ ok: true, queued: true });
+    return true;
+  }
+  const remain = await cooldownRemainMs(userId);
+  if (remain > 0) {
+    res.status(429).json({ ok: false, reason: 'rate-limited', error: '同步操作太频繁，请稍后再试', retryAfterSec: Math.ceil(remain / 1000) });
+    return false;
+  }
+  const now = Date.now();
+  await pool.query(
+    `INSERT INTO collection_sync_requests (user_id, kind, status, error, enqueued_at, started_at, finished_at)
+     VALUES (?, ?, 'queued', '', ?, 0, 0)
+     ON CONFLICT(user_id) DO UPDATE SET kind = excluded.kind, status = 'queued', error = '', enqueued_at = excluded.enqueued_at, started_at = 0, finished_at = 0`,
+    [userId, kind, now]
+  );
+  // 入队即开始冷却计时（完成时会再刷新为完成时间），避免排队期间反复点击
+  await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [now, userId]);
+  if (!importJobs.has(userId)) setMemoryJob(userId, kind, true);
+  importQueue.push({ userId });
+  startQueueWorker();
+  res.json({ ok: true, queued: true });
+  return true;
+}
+
+// 崩溃恢复：把 DB 中 queued/running 的任务重新置为 queued 并入内存队列（running=上次中断）
+async function recoverPendingSyncs() {
+  if (recoveryStarted) return;
+  recoveryStarted = true;
+  try {
+    const [rows] = await pool.query(
+      `SELECT * FROM collection_sync_requests WHERE status IN ('queued', 'running') ORDER BY enqueued_at ASC`
+    );
+    for (const r of rows) {
+      await pool.query(
+        `UPDATE collection_sync_requests SET status = 'queued', error = '', started_at = 0, finished_at = 0 WHERE id = ?`,
+        [r.id]
+      );
+      if (!importJobs.has(r.user_id)) setMemoryJob(r.user_id, r.kind || 'import', true);
+      importQueue.push({ userId: r.user_id });
+    }
+    if (rows.length) {
+      console.log('[collections] sync queue recovered', rows.length, 'pending job(s)');
+      startQueueWorker();
+    }
+  } catch (e) {
+    console.error('[collections] recover pending syncs failed:', e.message);
+  }
+}
+
+// 全局队列 worker：串行执行，同一时刻整个进程只有一个同步任务在跑
+function startQueueWorker() {
+  if (queueRunner) return;
+  queueRunner = (async () => {
+    while (importQueue.length) {
+      const { userId } = importQueue.shift();
+      const job = importJobs.get(userId);
+      if (!job || job.running || !job.queued) continue;
+      job.running = true;
+      job.queued = false;
+      job.startedAt = Date.now();
+      try {
+        await pool.query(
+          `UPDATE collection_sync_requests SET status = 'running', started_at = ?, finished_at = 0 WHERE user_id = ?`,
+          [job.startedAt, userId]
+        );
+        const [users] = await pool.query('SELECT * FROM users WHERE id = ?', [userId]);
+        if (!users.length) {
+          job.error = '用户不存在';
+        } else if (job.kind === 'export') {
+          await runBgmExport(userId, users[0]);
+        } else {
+          await runBgmImport(userId, users[0]);
+        }
+      } catch (e) {
+        job.error = e.message || '同步失败';
+        console.error('[collections] sync job failed for user', userId, ':', e.message);
+      } finally {
+        job.running = false;
+        const finishedAt = Date.now();
+        const status = job.error ? 'failed' : 'done';
+        try {
+          await pool.query(
+            `UPDATE collection_sync_requests SET status = ?, error = ?, finished_at = ? WHERE user_id = ?`,
+            [status, String(job.error || '').slice(0, 500), finishedAt, userId]
+          );
+          // 任务真正结束后刷新冷却计时（取完成时间，避免完成前立刻重发）
+          await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [finishedAt, userId]);
+        } catch (e) {
+          console.error('[collections] persist job result failed for user', userId, ':', e.message);
+        }
+      }
+    }
+    queueRunner = null;
+  })();
+}
 async function insertBgmItems(conn, userId, items, subjectType) {
   for (const c of items) {
     const s = c.subject || {};
@@ -227,9 +360,17 @@ async function insertBgmItems(conn, userId, items, subjectType) {
   }
 }
 
-// 后台导入任务：按类型分页拉取并写入本地表（upsert，可重复执行）
-async function runBgmImport(userId, bangumiUid, token) {
+// 后台导入任务：按类型分页拉取并写入本地表（upsert，可重复执行）；token 在真正执行时取最新
+async function runBgmImport(userId, user) {
   const job = importJobs.get(userId);
+  if (!job) return;
+  let token = null;
+  try { token = await getValidToken(user); } catch (e) { /* 刷新失败按未连接处理 */ }
+  if (!token) {
+    job.error = 'Bangumi 未连接或授权已失效';
+    return;
+  }
+  const bangumiUid = user.bangumi_uid;
   const types = [1, 2, 3, 4, 6];
   try {
     for (const subjectType of types) {
@@ -260,38 +401,22 @@ async function runBgmImport(userId, bangumiUid, token) {
     job.error = e.message || '导入失败';
     console.error('[collections] import job failed for user', userId, ':', e.message);
   }
-  job.running = false;
 }
 
-// 触发导入：立即返回，后台执行
-router.post('/collections/import', async (req, res, next) => {
+// 反向同步：把本地收藏推送到 Bangumi（同样入全局队列串行执行）
+async function runBgmExport(userId, user) {
+  const job = importJobs.get(userId);
+  if (!job) return;
+  let token = null;
+  try { token = await getValidToken(user); } catch (e) { /* 刷新失败按未连接处理 */ }
+  if (!token) {
+    job.error = 'Bangumi 未连接或授权已失效';
+    return;
+  }
+  const [rows] = await pool.query('SELECT * FROM collections WHERE user_id = ?', [userId]);
+  job.total = rows.length;
+  let pushed = 0;
   try {
-    const token = await getValidToken(req.user);
-    if (!token) return res.status(400).json({ error: 'Bangumi 未连接' });
-    const existing = importJobs.get(req.user.id);
-    if (existing && existing.running) return res.json({ ok: false, reason: 'already running' });
-    importJobs.set(req.user.id, {
-      running: true, done: 0, total: 0, expected: 0, currentType: 0, error: '', startedAt: Date.now()
-    });
-    runBgmImport(req.user.id, req.user.bangumi_uid, token); // 不 await，后台跑
-    res.json({ ok: true, running: true });
-  } catch (e) { next(e); }
-});
-
-// 导入进度查询（前端轮询）
-router.get('/collections/import/status', (req, res) => {
-  const job = importJobs.get(req.user.id);
-  if (!job) return res.json({ running: false, done: 0, total: 0, expected: 0, currentType: 0, error: '' });
-  res.json(job);
-});
-
-// 将本地收藏推送到 Bangumi（反向同步）
-router.post('/collections/export', async (req, res, next) => {
-  try {
-    const token = await getValidToken(req.user);
-    if (!token) return res.status(400).json({ error: 'Bangumi 未连接' });
-    const [rows] = await pool.query('SELECT * FROM collections WHERE user_id = ?', [req.user.id]);
-    let pushed = 0;
     for (const c of rows) {
       try {
         const body = {
@@ -306,9 +431,37 @@ router.post('/collections/export', async (req, res, next) => {
         if (+c.subject_type === 1) body.ep_status = Math.max(0, Math.round(+(c.ep_status || 0)));
         await bgm(`/v0/users/-/collections/${c.subject_id}`, { method: 'PATCH', token, body });
         pushed++;
-      } catch (e) { /* skip failed */ }
+      } catch (e) { /* 单条失败跳过，不中断整体导出 */ }
+      job.done = pushed;
     }
-    res.json({ ok: true, pushed });
+  } catch (e) {
+    job.error = e.message || '导出失败';
+    console.error('[collections] export job failed for user', userId, ':', e.message);
+  }
+}
+
+// 触发导入：入队后立即返回，由全局队列串行执行
+router.post('/collections/import', async (req, res, next) => {
+  try {
+    const token = await getValidToken(req.user);
+    if (!token) return res.status(400).json({ error: 'Bangumi 未连接' });
+    await enqueueSync(req.user.id, 'import', res);
+  } catch (e) { next(e); }
+});
+
+// 导入进度查询（前端轮询：running=true 执行中；queued=true 排队中；两者皆 false 且无 error 即完成）
+router.get('/collections/import/status', (req, res) => {
+  const job = importJobs.get(req.user.id);
+  if (!job) return res.json({ running: false, queued: false, done: 0, total: 0, expected: 0, currentType: 0, error: '' });
+  res.json(job);
+});
+
+// 将本地收藏推送到 Bangumi（反向同步，同样入队串行执行）
+router.post('/collections/export', async (req, res, next) => {
+  try {
+    const token = await getValidToken(req.user);
+    if (!token) return res.status(400).json({ error: 'Bangumi 未连接' });
+    await enqueueSync(req.user.id, 'export', res);
   } catch (e) { next(e); }
 });
 
@@ -334,3 +487,5 @@ router.get('/me/collections/:subjectId', async (req, res, next) => {
 });
 
 module.exports = router;
+// 供 server.js 在 DB 就绪后调用：恢复上次进程中断的同步任务（重启不丢任务）
+router.initSyncQueue = recoverPendingSyncs;

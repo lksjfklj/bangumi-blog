@@ -3,6 +3,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireOwner } = require('../auth');
+const { clientIpOf } = require('../security');
 const router = express.Router();
 
 const MAX_LEN = 2000;
@@ -49,8 +50,7 @@ router.post('/posts/:slug/comments', async (req, res, next) => {
     const parentId = Math.max(0, +body.parent_id || 0);
     const isOwner = !!(req.user && +req.user.is_owner === 1 && req.user.kind !== 'viewer');
     const status = isOwner ? 'approved' : 'pending';
-    const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    const ip = fwd || (req.socket && req.socket.remoteAddress) || '';
+    const ip = clientIpOf(req) || '';
     await pool.query(
       'INSERT INTO comments (post_id, parent_id, user_id, name, content, status, ip) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [posts[0].id, parentId, req.user ? req.user.id : null, name, content, status, ip.slice(0, 45)]

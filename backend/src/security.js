@@ -12,6 +12,12 @@ function originOf(req) {
 function isLocalDev(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
 }
+// 客户端真实 IP：X-Forwarded-For 取最右一段（nginx 已把 XFF 覆盖为 $remote_addr 时只有一段），
+// 避免客户端伪造 XFF 绕过按 IP 的限流/风控；缺失时回退到 socket 对端地址。
+function clientIpOf(req) {
+  const fwd = (req.headers['x-forwarded-for'] || '').split(',').pop().trim();
+  return fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
 
 function isSameOrigin(req) {
   const o = originOf(req);
@@ -62,8 +68,7 @@ function originGuard(req, res, next) {
 const buckets = new Map();
 function rateLimit({ windowMs = 60 * 1000, max = 120, name = 'api' } = {}) {
   return (req, res, next) => {
-    const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    const ip = fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+    const ip = clientIpOf(req);
     const now = Date.now();
     const arr = (buckets.get(ip) || []).filter(x => now - x.t < windowMs);
     if (arr.filter(x => x.k === name).length >= max) {
@@ -77,4 +82,4 @@ function rateLimit({ windowMs = 60 * 1000, max = 120, name = 'api' } = {}) {
   };
 }
 
-module.exports = { securityHeaders, originGuard, rateLimit, isSameOrigin, originOf };
+module.exports = { securityHeaders, originGuard, rateLimit, isSameOrigin, originOf, clientIpOf };

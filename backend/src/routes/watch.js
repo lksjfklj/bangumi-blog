@@ -753,22 +753,23 @@ router.get('/filters', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// 来源列表 + 抓取状态 + 各源条数
+// 来源列表（公开，供前端展示可用源）+ 抓取状态（仅站长可见，避免泄漏 RSS 抓取调度/错误详情）
 router.get('/sources', async (req, res, next) => {
   try {
     await reloadConfig();
+    const isOwner = req.user && req.user.kind !== 'viewer' && +req.user.is_owner === 1;
     const [rows] = await pool.query('SELECT source, COUNT(*) AS n FROM anime_episodes GROUP BY source');
     const counts = {};
     for (const r of rows) counts[r.source] = r.n;
     res.json({
       sources: SOURCES_CACHE.map(s => ({ key: s.key, name: s.name, lang: s.lang, emoji: s.emoji, desc: s.desc, count: counts[s.key] || 0 })),
-      lastRunAt, lastError, lastSourceResults
+      ...(isOwner ? { lastRunAt, lastError, lastSourceResults } : {})
     });
   } catch (e) { next(e); }
 });
 
-// 配置读取（公开：只读源列表 + 排除词）
-router.get('/config', async (req, res, next) => {
+// 配置读取（仅站长）：RSS 源开关/自定义 URL、排除词、通知渠道等属于后台配置
+router.get('/config', requireOwner, async (req, res, next) => {
   try {
     await reloadConfig();
     const kw = await getSetting('watch_exclude_keywords', null);

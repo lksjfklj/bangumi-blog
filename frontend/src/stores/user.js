@@ -31,8 +31,8 @@ export const useUserStore = defineStore('user', {
       await this.fetchMe();
       return { ok: true };
     },
-    async registerLocal(username, password, nickname) {
-      await api.post('/auth/register', { username, password, nickname });
+    async registerLocal(username, password, nickname, email, code) {
+      await api.post('/auth/register', { username, password, nickname, email, code });
       await this.fetchMe();
       return { ok: true };
     },
