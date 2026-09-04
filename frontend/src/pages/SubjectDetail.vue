@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NSpin, NButton, NTag, NRate, NInput, NSelect, NModal, NEmpty, NAlert, NPopconfirm,
+  NSpin, NButton, NTag, NRate, NInput, NSelect, NModal, NEmpty, NAlert, NPopconfirm, NResult,
   useMessage
 } from 'naive-ui';
 import { api, img, fmtDate, scoreText, COLLECT_STATUS, STATUS_COLOR, parseTags } from '../api';
@@ -39,6 +39,7 @@ const staff = ref([]);
 const related = ref([]);
 const loading = ref(true);
 const error = ref('');
+const notFound = ref(false);
 const collection = ref(null);
 const coverFailed = ref(false);
 const charFailed = {};
@@ -102,6 +103,7 @@ const epsWithStatus = computed(() => {
 async function loadSubject() {
   loading.value = true;
   error.value = '';
+  notFound.value = false;
   subject.value = null;
   coverFailed.value = false;
   episodes.value = [];
@@ -124,6 +126,8 @@ async function loadSubject() {
     related.value = (rel.data || []).filter(r => r.type === 2).slice(0, 12);
   } catch (e) {
     error.value = e.message;
+    notFound.value = e.status === 404 || /\b404\b/.test(e.message || '');
+    document.title = notFound.value ? '未找到该条目 · 秘封俱乐部' : '秘封俱乐部';
   }
   loading.value = false;
   loadCollection();
@@ -208,6 +212,9 @@ watch(id, loadSubject);
 watch(subject, (sVal) => {
   summaryExpanded.value = false;
   summaryLong.value = false;
+  document.title = (sVal && (sVal.name_cn || sVal.name))
+    ? (sVal.name_cn || sVal.name) + ' · 秘封俱乐部'
+    : '秘封俱乐部';
   if (sVal && sVal.summary) nextTick(measureSummary);
 });
 </script>
@@ -215,7 +222,20 @@ watch(subject, (sVal) => {
 <template>
   <div class="container">
     <n-spin :show="loading">
-      <n-alert v-if="error" type="error" style="margin-top:20px">{{ error }}</n-alert>
+      <div v-if="error && notFound" style="padding:50px 0 30px">
+        <n-result status="404" title="未找到该条目" description="该条目不存在、已被删除，或 Bangumi 暂未收录">
+          <template #footer>
+            <n-button type="primary" round @click="router.push('/anime')">回番剧库看看</n-button>
+          </template>
+        </n-result>
+      </div>
+      <div v-else-if="error" style="margin-top:20px">
+        <n-alert type="error">{{ error }}</n-alert>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:14px">
+          <n-button round secondary @click="loadSubject">重试</n-button>
+          <n-button round @click="router.push('/anime')">回番剧库</n-button>
+        </div>
+      </div>
 
       <template v-if="subject">
         <div class="back-row">
@@ -281,7 +301,7 @@ watch(subject, (sVal) => {
               <div v-if="episodes.length" class="ep-list">
                 <div v-for="ep in epsWithStatus" :key="ep.id" class="ep-item" :class="{ done: ep.done, cur: ep.isCur }"
                   :title="ep.name_cn || ep.name" @click="markEp(ep)">
-                  {{ ep.sort }}<span v-if="ep.name_cn || ep.name" class="ep-name">{{ (ep.name_cn || ep.name).slice(0, 6) }}</span>
+                  {{ ep.sort }}<span v-if="ep.name_cn || ep.name" class="ep-name">{{ ep.name_cn || ep.name }}</span>
                 </div>
               </div>
               <n-empty v-else description="暂无章节" :show-icon="false" style="padding:20px" />
@@ -413,7 +433,16 @@ watch(subject, (sVal) => {
 .info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .info-table td { padding: 5px 8px; vertical-align: top; }
 .info-table .k { color: var(--text-dim); width: 90px; white-space: nowrap; }
-.ep-name { display: block; font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.ep-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  line-height: 1.45;
+}
 .char-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 10px; }
 .char-item { text-align: center; }
 .char-item img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }

@@ -32,6 +32,7 @@ async function load() {
     else errorMsg.value = e.message;
   }
   loading.value = false;
+  document.title = data.value ? data.value.user.nickname + ' 的追番 · 秘封俱乐部' : '秘封俱乐部';
 }
 onMounted(load);
 </script>

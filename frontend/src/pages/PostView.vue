@@ -26,6 +26,7 @@ async function load() {
     error.value = e.message;
   }
   loading.value = false;
+  document.title = post.value ? post.value.title + ' · 秘封俱乐部' : '秘封俱乐部';
 }
 
 onMounted(load);
