@@ -1,6 +1,6 @@
 // routes/anime.js - 番剧数据（日历/搜索/条目/章节/角色/制作人员/相关）
 const express = require('express');
-const { bgm, bgmWeb, cached } = require('../bangumi');
+const { bgm, bgmWeb, cached, getValidToken } = require('../bangumi');
 const { queryLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
 const { requireOwner } = require('../auth');
 const releasecal = require('../releasecal');
@@ -9,6 +9,19 @@ const { pool } = require('../db');
 const router = express.Router();
 
 const SUBJECT_TYPES = { 1: 'book', 2: 'anime', 3: 'music', 4: 'game', 6: 'real' };
+// Bangumi API 对 R18（NSFW）条目在无 token 请求时一律返回 404（对外表现等同「已删除」）。
+// 本站库/日历公开包含 R18 条目（Galgame/成人漫画小说等），详情页也按公开处理，
+// 因此条目详情类接口统一用站长 token 兜底，否则 R18 条目详情会误报 404。
+async function resolveSubjectToken() {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, access_token, refresh_token, token_expires_at FROM users WHERE is_owner = 1 LIMIT 1'
+    );
+    if (!rows || !rows.length) return null;
+    return await getValidToken(rows[0]);
+  } catch (e) { return null; }
+}
+
 
 // 读取本地 galgame 库已回填的 VNDB 摘要（无匹配/未回填/被封禁返回 null），供条目详情页展示增强数据
 async function localVndbExt(subjectId) {
@@ -98,7 +111,8 @@ router.post('/search', async (req, res, next) => {
 router.get('/subjects/:id', async (req, res, next) => {
   try {
     const id = +req.params.id;
-    const data = await cached('bgm:subject:' + id, 24 * 3600 * 1000, () => bgm('/v0/subjects/' + id));
+    const token = await resolveSubjectToken();
+    const data = await cached('bgm:subject:' + id, 24 * 3600 * 1000, () => bgm('/v0/subjects/' + id, token ? { token } : {}));
     // 详情页增强：附上 VNDB 已回填的结构化元数据（开发商/发行日/评分/封面等），无匹配则为 null
     if (data && typeof data === 'object') data.vndb = await localVndbExt(id);
     res.json(data);
@@ -112,7 +126,8 @@ router.get('/subjects/:id/episodes', async (req, res, next) => {
     const offset = +(req.query.offset || 0);
     const limit = Math.min(+(req.query.limit || 100), 200);
     const key = `bgm:episodes:${id}:${offset}:${limit}`;
-    const data = await cached(key, 24 * 3600 * 1000, () => bgm(`/v0/episodes?subject_id=${id}&offset=${offset}&limit=${limit}`));
+    const token = await resolveSubjectToken();
+    const data = await cached(key, 24 * 3600 * 1000, () => bgm(`/v0/episodes?subject_id=${id}&offset=${offset}&limit=${limit}`, token ? { token } : {}));
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -121,7 +136,8 @@ router.get('/subjects/:id/episodes', async (req, res, next) => {
 router.get('/subjects/:id/characters', async (req, res, next) => {
   try {
     const id = +req.params.id;
-    const data = await cached('bgm:chars:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/characters`));
+    const token = await resolveSubjectToken();
+    const data = await cached('bgm:chars:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/characters`, token ? { token } : {}));
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -130,7 +146,8 @@ router.get('/subjects/:id/characters', async (req, res, next) => {
 router.get('/subjects/:id/persons', async (req, res, next) => {
   try {
     const id = +req.params.id;
-    const data = await cached('bgm:persons:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/persons`));
+    const token = await resolveSubjectToken();
+    const data = await cached('bgm:persons:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/persons`, token ? { token } : {}));
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -139,7 +156,8 @@ router.get('/subjects/:id/persons', async (req, res, next) => {
 router.get('/subjects/:id/related', async (req, res, next) => {
   try {
     const id = +req.params.id;
-    const data = await cached('bgm:related:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/subjects`));
+    const token = await resolveSubjectToken();
+    const data = await cached('bgm:related:' + id, 24 * 3600 * 1000, () => bgm(`/v0/subjects/${id}/subjects`, token ? { token } : {}));
     res.json(data);
   } catch (e) { next(e); }
 });
