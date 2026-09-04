@@ -60,6 +60,9 @@ function vndbPlatformLabel(p) { return VNDB_PLATFORMS[p] || String(p || '').toUp
 function vndbLengthLabel(n) { return VNDB_LENGTH[n] || (n ? String(n) : ''); }
 function vndbLangLabel(l) { return VNDB_LANGS[l] || String(l || '').toUpperCase(); }
 function vndbScore(n) { const x = Number(n); return x ? x.toFixed(1) : '—'; }
+// VNDB API v2 的 id 自带 'v' 前缀（如 v63659），个别旧数据可能是纯数字，统一归一化后再拼链接
+function vndbIdNum(id) { return String(id || '').trim().replace(/^[vV]/, ''); }
+function vndbHref(id) { return 'https://vndb.org/v' + vndbIdNum(id); }
 
 // 收藏编辑
 const editing = ref(false);
@@ -312,7 +315,7 @@ watch(subject, (sVal) => {
             <div v-if="vndb" class="block">
               <div class="block-title">
                 VNDB 增强数据
-                <a class="vndb-link" :href="'https://vndb.org/v' + vndb.id" target="_blank" rel="noopener">v{{ vndb.id }} ↗</a>
+                <a class="vndb-link" :href="vndbHref(vndb.id)" target="_blank" rel="noopener">v{{ vndbIdNum(vndb.id) }} ↗</a>
               </div>
               <div class="vndb-head">
                 <img v-if="vndb.image" class="vndb-cover" :src="img(vndb.image)" alt="VNDB 封面" loading="lazy" @error="$event.target.style.display='none'" />
