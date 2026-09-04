@@ -4,6 +4,8 @@
 //       Bangumi v0 的 type=1 & sort=date 流本身就是按条目登载日期/发售日维护的，
 //       因此直接用「date 倒序流 + offset 游标」把近 WINDOW_BACK_DAYS ~ WINDOW_FORWARD_DAYS
 //       窗口内登载的 漫画/小说 条目收进 bgm_book_release_calendar，供书籍 tab 顶部日历展示。
+// 扫描带站长 Bangumi token：bgm 对匿名请求隐藏 R18/nsfw 书目条目，带 token 才能把成人漫画/小说
+// 的新刊/新卷也收进日历（与全量库同步、条目详情接口的 token 兜底一致）。
 // 数据流：
 //   1) 每 6h 扫一次 date 流（offset 0 → 越过窗口左界即停，页面按日期单调递减，
 //      遇到远未来/已过窗口的行快速跳过），幂等 upsert 到 bgm_book_release_calendar；
@@ -67,14 +69,24 @@ function classifyPlatform(platform) {
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+// 获取站长（owner）的有效 Bangumi token：查库 + 失效自动刷新；找不到/刷新失败返回 null
+async function getOwnerToken() {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, access_token, refresh_token, token_expires_at FROM users WHERE is_owner = 1 AND access_token IS NOT NULL LIMIT 1'
+    );
+    if (rows && rows.length) return await bangumi.getValidToken(rows[0]);
+  } catch (e) { /* ignore */ }
+  return null;
+}
 
 // 抓取一页 sort=date 书籍流（429/503 指数退避重试）
-async function fetchPage(offset, limit = PAGE_LIMIT) {
+async function fetchPage(offset, limit = PAGE_LIMIT, token = null) {
   const url = '/v0/subjects?type=1&sort=date&offset=' + offset + '&limit=' + limit;
   let err;
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      return await bangumi.bgm(url);
+      return await bangumi.bgm(url, token ? { token } : {});
     } catch (e) {
       err = e;
       if (e && (e.status === 429 || e.status === 503)) {
@@ -161,6 +173,8 @@ async function scanOnce(opts = {}) {
   try {
     const state = (await rssconfig.getSetting(STATE_KEY, {})) || {};
     const firstRun = !state.lastRunAt;
+    const token = await getOwnerToken();
+    if (!token) console.warn('[bookrelease] 未获取到站长 Bangumi token，本次扫描看不到 R18/nsfw 书目条目');
     const today = todayStr(opts.now);
     const from = addDays(today, -WINDOW_BACK_DAYS);
     const to = addDays(today, WINDOW_FORWARD_DAYS);
@@ -168,7 +182,7 @@ async function scanOnce(opts = {}) {
     const stats = { from, to, first: firstRun, pages: 0, fetched: 0, saved: 0, skippedFuture: 0, skippedOld: 0, truncated: false };
     let offset = 0;
     for (let p = 0; p < MAX_PAGES; p++) {
-      const data = await fetchPage(offset);
+      const data = await fetchPage(offset, PAGE_LIMIT, token);
       const batch = (data && (data.data || [])) || [];
       stats.pages++;
       if (!batch.length) break;

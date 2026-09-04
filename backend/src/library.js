@@ -7,7 +7,7 @@
 //            或 EROGE_MARKERS（R18/18禁/eroge/黄油/エロゲー…）-> galgame；
 //            系列名命中 GALGAME_NAME_PATTERNS（逆转裁判/兰斯等被标成 AVG/RPG/SLG 的名作）也收录。
 //            注意：AVG/ADV 不单独作为白名单（bgm 里塞尔达/大镖客等主机欧美大作同样带 AVG 标签）。
-// 游戏同步带站长 Bangumi token 拉全量 rank 列表，R18(nsfw) 条目才可见；token 缺失时降级匿名抓取。
+// 书籍/游戏同步均带站长 Bangumi token 拉全量 rank 列表，R18(nsfw) 条目（成人漫画/轻小说、R18 galgame）才可见；token 缺失时降级匿名抓取。
 // 地区规则：按每本书的用户标签判定；明确标注为非中日韩地区的条目标记 blocked=1 排除；
 //          未标注地区的条目保留（bgm 书籍库以中日韩为主），前端可用「地区」筛选只看已确认的中日韩。
 const { bgm, getValidToken } = require('./bangumi');
@@ -257,7 +257,14 @@ async function fetchByType(type, onBatch, { stopOnRangeEnd = false, token = null
   return total;
 }
 
-async function fetchAllBooks(onBatch) { return fetchByType(1, onBatch); }
+async function fetchAllBooks(onBatch) {
+  // 带站长 token 拉取：bgm 对匿名请求同样隐藏 R18/nsfw 书目（成人漫画/轻小说）条目，
+  // 与游戏同步一致，带 token 才能把全年龄 + R18 书籍完整扫进来；token 缺失时降级匿名抓取。
+  const token = await getOwnerToken();
+  if (!token) console.warn('[library] 未获取到站长 Bangumi token，本次书籍同步看不到 R18/nsfw 书目条目');
+  // 匿名（条目少）时保持原翻页到底行为；带 token 后列表更长，offset 越界返回 400 时按已到底处理
+  return fetchByType(1, onBatch, { stopOnRangeEnd: !!token, token });
+}
 async function fetchAllGames(onBatch) {
   // 带站长 token 拉取：bgm 对匿名请求隐藏 R18(nsfw) 条目，带 token 才能把全年龄+R18 完整扫进来
   const token = await getOwnerToken();
