@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import {
-  NSpin, NButton, NTag, NRate, NInput, NSelect, NModal, NEmpty, NAlert, NPopconfirm, NResult,
+  NSpin, NButton, NTag, NRate, NInput, NSelect, NModal, NEmpty, NAlert, NResult,
   useMessage
 } from 'naive-ui';
 import { api, img, fmtDate, scoreText, COLLECT_STATUS, STATUS_COLOR, parseTags } from '../api';
@@ -91,6 +91,8 @@ const infoLines = computed(() => {
   return arr;
 });
 
+// 章节最大序号：跨季条目的 sort 可能是 78~85 而非 1~8，进度上限按实际序号算
+const maxEpSort = computed(() => episodes.value.reduce((m, e) => Math.max(m, +e.sort || 0), 0));
 const epsWithStatus = computed(() => {
   const epStatus = collection.value ? +collection.value.ep_status : 0;
   return episodes.value.map((ep, i) => ({
@@ -160,24 +162,16 @@ function openEdit(status) {
 async function saveCollection() {
   try {
     const d = await api.put('/collections/' + id.value, editForm.value);
-    collection.value = { ...collection.value, ...editForm.value, subject_id: id.value };
-    if (d && d.bgmSynced === false) message.warning('已保存（Bangumi 同步失败，稍后可重试）');
-    else message.success('已保存');
+    const pend = !!(d && d.pending);
+    collection.value = { ...(collection.value || {}), ...editForm.value, subject_id: id.value, sync_dirty: pend ? 1 : 0, sync_error: pend ? (d.error || 'Bangumi 同步失败') : null };
+    if (pend) message.warning('已保存在本站，Bangumi 同步失败，将自动重试');
+    else message.success('已保存并同步到 Bangumi');
     editing.value = false;
   } catch (e) {
     message.error(e.message);
   }
 }
 
-async function removeCollection() {
-  try {
-    await api.del('/collections/' + id.value);
-    collection.value = null;
-    message.success('已取消收藏');
-  } catch (e) {
-    message.error(e.message);
-  }
-}
 
 async function markEp(ep) {
   if (!userStore.user) { login(); return; }
@@ -190,8 +184,9 @@ async function markEp(ep) {
   };
   try {
     const d = await api.put('/collections/' + id.value, editForm.value);
-    collection.value = { ...(collection.value || {}), ...editForm.value, subject_id: id.value };
-    if (d && d.bgmSynced === false) message.warning('进度已更新到第 ' + epStatus + ' 话（Bangumi 同步失败）');
+    const pend = !!(d && d.pending);
+    collection.value = { ...(collection.value || {}), ...editForm.value, subject_id: id.value, sync_dirty: pend ? 1 : 0, sync_error: pend ? (d.error || 'Bangumi 同步失败') : null };
+    if (pend) message.warning('进度已更新到第 ' + epStatus + ' 话（已保存在本站，Bangumi 同步失败，将自动重试）');
     else message.success('进度已更新到第 ' + epStatus + ' 话');
   } catch (e) {
     message.error(e.message);
@@ -268,14 +263,13 @@ watch(subject, (sVal) => {
                 <n-button v-for="(label, val) in COLLECT_STATUS" :key="val" size="small"
                   :type="collection && +collection.status === +val ? 'primary' : 'default'"
                   @click="openEdit(+val)">{{ label }}</n-button>
-                <n-popconfirm v-if="collection" @positive-click="removeCollection">
-                  <template #trigger><n-button size="small" type="error" quaternary>取消收藏</n-button></template>
-                  确定要取消收藏吗？
-                </n-popconfirm>
                 <n-button v-if="collection" size="small" @click="openEdit(collection.status)">编辑</n-button>
               </template>
               <n-button v-else size="small" type="primary" @click="login">登录后追番</n-button>
             </div>
+            <n-alert v-if="collection && +collection.sync_dirty === 1" type="warning" :show-icon="false" style="margin-top:12px">
+              本站已保存本次改动，但同步到 Bangumi 失败，将自动重试。原因：{{ collection.sync_error || '未知错误' }}
+            </n-alert>
             <div v-if="collection && parseTags(collection.tags).length" class="my-tags">
               <span class="muted" style="margin-right:4px">我的标签：</span>
               <n-tag v-for="t in parseTags(collection.tags)" :key="t" size="small" type="info" :bordered="false" style="margin:2px">{{ t }}</n-tag>
@@ -298,6 +292,7 @@ watch(subject, (sVal) => {
 
             <div class="block">
               <div class="block-title">章节 ({{ epsTotal }})</div>
+              <div v-if="episodes.length && userStore.user && !userStore.viewer" class="ep-hint">点击未看集数可更新进度到该话；点击已看集数可回退进度（取消之后集数的看过），修改会同步到 Bangumi。</div>
               <div v-if="episodes.length" class="ep-list">
                 <div v-for="ep in epsWithStatus" :key="ep.id" class="ep-item" :class="{ done: ep.done, cur: ep.isCur }"
                   :title="ep.name_cn || ep.name" @click="markEp(ep)">
@@ -384,7 +379,7 @@ watch(subject, (sVal) => {
         </div>
         <div class="field">
           <label>{{ subject.type === 1 ? '看到第几卷/话' : '看到第几话' }}</label>
-          <n-input-number v-model:value="editForm.ep_status" :min="0" :max="Math.max(epsTotal, 1)" style="width:100%" />
+          <n-input-number v-model:value="editForm.ep_status" :min="0" :max="Math.max(maxEpSort, epsTotal, 1)" style="width:100%" />
         </div>
         <div class="field">
           <label>评论</label>
@@ -430,6 +425,7 @@ watch(subject, (sVal) => {
 .block { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
 .block-title { font-weight: 700; margin-bottom: 12px; }
 .block-title::before { content: '✿ '; color: var(--accent); }
+.ep-hint { font-size: 12px; color: var(--text-dim); margin: -2px 0 10px; line-height: 1.5; }
 .info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .info-table td { padding: 5px 8px; vertical-align: top; }
 .info-table .k { color: var(--text-dim); width: 90px; white-space: nowrap; }

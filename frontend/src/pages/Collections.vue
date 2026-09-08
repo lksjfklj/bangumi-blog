@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { NButton, NTabs, NTabPane, NEmpty, NSpin, NPagination, NSelect, NPopconfirm, NAlert, NModal, NProgress, NDropdown, useMessage } from 'naive-ui';
+import { NButton, NTabs, NTabPane, NEmpty, NSpin, NPagination, NSelect, NAlert, NModal, NProgress, NDropdown, useMessage } from 'naive-ui';
 import { api, COLLECT_STATUS, STATUS_COLOR, parseTags, episodeLabel } from '../api';
 import { useUserStore } from '../stores/user';
 import SubjectCard from '../components/SubjectCard.vue';
@@ -89,8 +89,7 @@ const importDoneText = computed(() => {
   if (!j) return '';
   if (!j.running && j.queued) return '已进入同步队列，等待前面的任务完成后自动开始，请勿关闭页面…';
   const typeName = j.currentType ? ({ 1: '书籍', 2: '动画', 3: '音乐', 4: '游戏', 6: '三次元' }[j.currentType] || '条目') : '';
-  const action = j.kind === 'export' ? '已推送' : '已导入';
-  return `${action} ${j.done} 条${typeName ? '（正在处理' + typeName + '…）' : ''}`;
+  return `已导入 ${j.done} 条${typeName ? '（正在处理' + typeName + '…）' : ''}`;
 });
 
 let loadSeq = 0;
@@ -129,12 +128,13 @@ function onTabChange() { page.value = 1; load(); }
 function onTagChange() { page.value = 1; load(); }
 function onPage(p) { page.value = p; load(); }
 
-// 统一的 Bangumi 同步入口（导入/推送都入全局队列，逐个执行；带每用户冷却）
-async function startSync(kind) {
+// 从 Bangumi 拉取收藏到本地（入全局队列串行执行，带每用户冷却）；
+// 同步开始时会先把本站待重推（Bangumi 同步失败）的改动补推给 Bangumi，再拉取最新收藏回写本地
+async function startSync() {
   importing.value = true;
-  importJob.value = { kind, running: false, queued: true, done: 0, expected: 0, total: 0, currentType: 0, error: '' };
+  importJob.value = { kind: 'import', running: false, queued: true, done: 0, expected: 0, total: 0, currentType: 0, error: '' };
   try {
-    const d = await api.post(kind === 'export' ? '/collections/export' : '/collections/import');
+    const d = await api.post('/collections/import');
     if (d && d.ok === false) { throw new Error(d.error || (d.reason === 'already queued' ? '已有同步任务在排队，请等待完成后再试' : '请求被拒绝')); }
     if (d && d.reason === 'rate-limited') { throw new Error('操作过于频繁，请 ' + (d.retryAfterSec || 60) + ' 秒后再试'); }
     pollImport();
@@ -144,8 +144,7 @@ async function startSync(kind) {
     message.error(e.message || '请求失败');
   }
 }
-function importFromBgm() { startSync('import'); }
-function syncToBgm() { startSync('export'); }
+function importFromBgm() { startSync(); }
 
 async function pollImport() {
   try {
@@ -157,13 +156,11 @@ async function pollImport() {
       return;
     }
     importing.value = false;
-    const isExport = importJob.value && importJob.value.kind === 'export';
     if (d.error) {
-      message.error((isExport ? '推送失败：' : '导入失败：') + d.error);
+      message.error('导入失败：' + d.error);
     } else {
       const n = d.total || d.done || 0;
-      if (isExport) message.success('已推送 ' + n + ' 条到 Bangumi');
-      else message.success(n ? '导入完成：' + n + ' 条' : '没有需要导入的收藏');
+      message.success(n ? '导入完成：' + n + ' 条' : '没有需要导入的收藏');
     }
     importJob.value = null;
     page.value = 1;
@@ -255,17 +252,14 @@ watch(() => route.query.tag, (v) => {
         <h2><span class="emoji">🌙</span>我的追番</h2>
         <div class="actions" v-if="userStore.user.connected && !userStore.viewer">
           <n-button size="small" :loading="importing" @click="importFromBgm">导入 Bangumi 收藏</n-button>
-          <n-popconfirm @positive-click="syncToBgm">
-            <template #trigger><n-button size="small" secondary>推送本地收藏到 Bangumi</n-button></template>
-            将本地收藏状态推送到 Bangumi？收藏较多时可能需要几分钟。
-          </n-popconfirm>
           <n-dropdown trigger="hover" :options="exportOptions" @select="doExport">
-            <n-button size="small" secondary>💾 导出备份</n-button>
+            <n-button size="small" secondary>💾 导出本地备份</n-button>
           </n-dropdown>
         </div>
       </div>
 
       <div class="auto-sync-line" v-if="autoSyncText">{{ autoSyncText }}</div>
+      <div class="auto-sync-line" v-if="userStore.user.connected && !userStore.viewer">💡 双向同步：在本站修改收藏/进度会立即写入 Bangumi；在 Bangumi 上的改动点「导入 Bangumi 收藏」或等待自动同步拉回本站。不再需要手动推送。</div>
 
       <div v-if="!updatesLoading && myUpdates.length" class="updates-bar" v-reveal>
         <div class="upd-head">
@@ -326,9 +320,9 @@ watch(() => route.query.tag, (v) => {
     </template>
 
     <!-- 导入进度弹窗：不可关闭，避免导入中断 -->
-    <n-modal :show="!!importJob" preset="card" :title="(importJob && importJob.kind === 'export') ? '正在推送本地收藏到 Bangumi' : '正在同步 Bangumi 收藏'" :mask-closable="false" :close-on-esc="false" style="width:460px;max-width:92vw">
+    <n-modal :show="!!importJob" preset="card" title="正在同步 Bangumi 收藏" :mask-closable="false" :close-on-esc="false" style="width:460px;max-width:92vw">
       <div class="import-box" v-if="importJob">
-        <p class="muted import-tip">{{ (importJob && importJob.kind === 'export') ? '正在把本地收藏逐条推送到你的 Bangumi 账号，请勿关闭页面。' : '正在从 Bangumi 拉取收藏并写入本地数据库，收藏较多时可能需要 1-3 分钟，请勿关闭页面。' }}</p>
+        <p class="muted import-tip">正在从 Bangumi 拉取收藏并写入本地数据库（若本站有改动但 Bangumi 暂未同步成功，会先自动补推）。收藏较多时可能需要 1-3 分钟，请勿关闭页面。</p>
         <n-progress type="line" :percentage="importPercent" :show-indicator="true" :processing="importJob.running" />
         <p class="muted import-done">{{ importDoneText }}</p>
       </div>

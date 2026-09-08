@@ -74,6 +74,9 @@ CREATE TABLE IF NOT EXISTS collections (
   comment TEXT,
   tags TEXT,
   updated_at INTEGER DEFAULT 0,
+  synced_at INTEGER DEFAULT 0,
+  sync_dirty INTEGER DEFAULT 0,
+  sync_error TEXT DEFAULT NULL,
   UNIQUE (user_id, subject_id)
 );
 CREATE INDEX IF NOT EXISTS idx_collections_user_status ON collections(user_id, status);
@@ -376,6 +379,17 @@ CREATE INDEX IF NOT EXISTS idx_sync_req_status ON collection_sync_requests(statu
     fn: () => {
       ensureColumn('users', 'last_collection_sync_at', 'last_collection_sync_at INTEGER DEFAULT 0');
       ensureColumn('email_verify_codes', 'fail_count', 'fail_count INTEGER DEFAULT 0');
+    }
+  },
+  {
+    id: 10,
+    name: 'bgm-dirty-sync-v10',
+    fn: () => {
+      ensureColumn('collections', 'synced_at', 'synced_at INTEGER DEFAULT 0');
+      ensureColumn('collections', 'sync_dirty', 'sync_dirty INTEGER DEFAULT 0');
+      ensureColumn('collections', 'sync_error', 'sync_error TEXT DEFAULT NULL');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_collections_dirty ON collections(user_id, sync_dirty)');
+
     }
   },
 ];
