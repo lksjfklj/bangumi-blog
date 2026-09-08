@@ -235,26 +235,24 @@ async function cooldownRemainMs(userId) {
   return remain > 0 ? remain : 0;
 }
 
-// 入队校验与登记：已运行/已排队 -> 拒绝；冷却期内 -> 429；否则写入 DB 后再入内存队列
-async function enqueueSync(userId, kind, res) {
+// 入队校验与登记（纯逻辑，不写 HTTP）：已运行/已排队 -> 拒绝；冷却期内 -> 限流；
+// 否则写入 DB 后再入内存队列并启动 worker。返回 { ok, queued, reason?, error?, retryAfterSec? }
+async function enqueueSyncCore(userId, kind) {
   const existing = importJobs.get(userId);
   if (existing && (existing.running || existing.queued)) {
-    res.json({ ok: false, reason: 'already queued', error: '已有同步任务在排队，请等待完成后再试' });
-    return false;
+    return { ok: false, reason: 'already queued', error: '已有同步任务在排队，请等待完成后再试' };
   }
   const row = await dbSyncRow(userId);
   if (row && (row.status === 'queued' || row.status === 'running')) {
-    // 内存状态丢失（如进程重启）但 DB 仍有未完成任务：重新入队继续执行
-    if (!existing) setMemoryJob(userId, row.kind || kind, true);
+    // 内存状态丢失（如进程重启）但 DB 仍有未完成任务：覆盖重建内存任务后重新入队继续执行
+    setMemoryJob(userId, row.kind || kind, true);
     importQueue.push({ userId });
     startQueueWorker();
-    res.json({ ok: true, queued: true });
-    return true;
+    return { ok: true, queued: true };
   }
   const remain = await cooldownRemainMs(userId);
   if (remain > 0) {
-    res.status(429).json({ ok: false, reason: 'rate-limited', error: '同步操作太频繁，请稍后再试', retryAfterSec: Math.ceil(remain / 1000) });
-    return false;
+    return { ok: false, reason: 'rate-limited', error: '同步操作太频繁，请稍后再试', retryAfterSec: Math.ceil(remain / 1000) };
   }
   const now = Date.now();
   await pool.query(
@@ -265,11 +263,22 @@ async function enqueueSync(userId, kind, res) {
   );
   // 入队即开始冷却计时（完成时会再刷新为完成时间），避免排队期间反复点击
   await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [now, userId]);
-  if (!importJobs.has(userId)) setMemoryJob(userId, kind, true);
+  // 覆盖旧的内存任务：即使上一次已完成（内存里残留 running=false/queued=false 的旧任务），
+  // 也必须重置为 queued=true，否则队列 worker 会把它当无效任务跳过，导致同一次进程生命周期里
+  // 第二次及以后的同步被静默丢弃（自动同步也会因此只生效一次）
+  setMemoryJob(userId, kind, true);
   importQueue.push({ userId });
   startQueueWorker();
-  res.json({ ok: true, queued: true });
-  return true;
+  return { ok: true, queued: true };
+}
+
+// 触发同步的 HTTP 入口（保持对外行为不变：已排队/其他失败返回 JSON，冷却期内 429）
+async function enqueueSync(userId, kind, res) {
+  const result = await enqueueSyncCore(userId, kind);
+  if (!result.ok && result.reason === 'rate-limited') {
+    return res.status(429).json(result);
+  }
+  res.json(result);
 }
 
 // 崩溃恢复：把 DB 中 queued/running 的任务重新置为 queued 并入内存队列（running=上次中断）
@@ -285,7 +294,7 @@ async function recoverPendingSyncs() {
         `UPDATE collection_sync_requests SET status = 'queued', error = '', started_at = 0, finished_at = 0 WHERE id = ?`,
         [r.id]
       );
-      if (!importJobs.has(r.user_id)) setMemoryJob(r.user_id, r.kind || 'import', true);
+      setMemoryJob(r.user_id, r.kind || 'import', true);
       importQueue.push({ userId: r.user_id });
     }
     if (rows.length) {
@@ -452,8 +461,8 @@ router.post('/collections/import', async (req, res, next) => {
 // 导入进度查询（前端轮询：running=true 执行中；queued=true 排队中；两者皆 false 且无 error 即完成）
 router.get('/collections/import/status', (req, res) => {
   const job = importJobs.get(req.user.id);
-  if (!job) return res.json({ running: false, queued: false, done: 0, total: 0, expected: 0, currentType: 0, error: '' });
-  res.json(job);
+  const base = job || { running: false, queued: false, done: 0, total: 0, expected: 0, currentType: 0, error: '' };
+  res.json({ ...base, autoSync: getAutoSyncInfo() });
 });
 
 // 将本地收藏推送到 Bangumi（反向同步，同样入队串行执行）
@@ -486,6 +495,83 @@ router.get('/me/collections/:subjectId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ---------- 追番收藏「自动同步」----------
+// 服务端定时把已连接 Bangumi 的用户的收藏拉回本地（只导入、不导出），避免每次手动点导入。
+// 与手动导入共用同一全局串行队列 + 每用户冷却，不会打爆 Bangumi API / 本地 1 核小机。
+const AUTO_SYNC_INTERVAL_MS = Math.max(config.bgmAutoImportIntervalMs || 0, 0);
+const AUTO_SYNC_FIRST_DELAY_MS = 30 * 1000; // 进程启动 30 秒后先自动同步一次
+const AUTO_SYNC_MAX_JOBS = 3;               // 每轮最多入队几个用户（串行逐个执行，避免一次堆积太多）
+let autoSyncStarted = false;   // 定时器只启动一次
+let autoSyncRunning = false;   // 正在扫描（防止上一轮没结束、下一轮重叠）
+let autoSyncLastRunAt = 0;     // 最近一次扫描开始时间（ms）
+let autoSyncNextRunAt = 0;     // 预计下次扫描时间（ms）
+let autoSyncLastResult = null; // 最近一次扫描结果 { users, enqueued, skipped }
+
+function getAutoSyncInfo() {
+  return {
+    enabled: autoSyncStarted && AUTO_SYNC_INTERVAL_MS > 0,
+    intervalMs: AUTO_SYNC_INTERVAL_MS,
+    running: autoSyncRunning,
+    lastRunAt: autoSyncLastRunAt || 0,
+    nextRunAt: autoSyncNextRunAt || 0,
+    lastResult: autoSyncLastResult
+  };
+}
+
+// 自动同步一轮：给所有已连接 Bangumi（有 token / refresh_token）的用户补拉收藏
+async function autoImportOnce() {
+  if (autoSyncRunning || AUTO_SYNC_INTERVAL_MS <= 0) return;
+  autoSyncRunning = true;
+  const startedAt = Date.now();
+  const result = { users: 0, enqueued: 0, skipped: 0 };
+  try {
+    const [rows] = await pool.query(
+      `SELECT id FROM users
+       WHERE bangumi_uid IS NOT NULL
+         AND (access_token IS NOT NULL AND access_token <> '' OR refresh_token IS NOT NULL AND refresh_token <> '')
+       ORDER BY id`
+    );
+    result.users = rows.length;
+    for (const u of rows) {
+      if (result.enqueued >= AUTO_SYNC_MAX_JOBS) break;
+      const job = importJobs.get(u.id);
+      if (job && (job.running || job.queued)) { result.skipped++; continue; }
+      // 冷却期内说明刚手动/自动同步过，留给下一轮再拉
+      const remain = await cooldownRemainMs(u.id);
+      if (remain > 0) { result.skipped++; continue; }
+      const r = await enqueueSyncCore(u.id, 'import');
+      if (r && r.ok) result.enqueued++;
+      else result.skipped++;
+    }
+  } catch (e) {
+    console.error('[collections] auto sync scan failed:', e.message);
+  } finally {
+    autoSyncLastRunAt = Date.now();
+    autoSyncNextRunAt = autoSyncLastRunAt + AUTO_SYNC_INTERVAL_MS;
+    autoSyncLastResult = result;
+    autoSyncRunning = false;
+    console.log('[collections] auto sync scan done:', JSON.stringify(result));
+  }
+}
+
+// 启动自动同步定时器（server.js 在 DB 就绪、同步队列恢复后调用）
+function startAutoImportScheduler() {
+  if (autoSyncStarted) return;
+  autoSyncStarted = true;
+  if (AUTO_SYNC_INTERVAL_MS <= 0) {
+    console.log('[collections] auto sync disabled (bgmAutoImportIntervalMs=0)');
+    return;
+  }
+  autoSyncNextRunAt = Date.now() + AUTO_SYNC_FIRST_DELAY_MS;
+  setTimeout(() => { autoImportOnce().catch(() => {}); }, AUTO_SYNC_FIRST_DELAY_MS);
+  setInterval(() => { autoImportOnce().catch(() => {}); }, AUTO_SYNC_INTERVAL_MS);
+  console.log('[collections] auto sync scheduler started, interval=' + (AUTO_SYNC_INTERVAL_MS / 3600000).toFixed(1) + 'h');
+}
+
 module.exports = router;
 // 供 server.js 在 DB 就绪后调用：恢复上次进程中断的同步任务（重启不丢任务）
 router.initSyncQueue = recoverPendingSyncs;
+// 供 server.js 在 DB 就绪后调用：启动追番收藏自动同步定时器
+router.startAutoImportScheduler = startAutoImportScheduler;
+// 自动同步状态查询（/collections/import/status 已附带该信息）
+router.getAutoSyncInfo = getAutoSyncInfo;

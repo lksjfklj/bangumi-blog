@@ -26,7 +26,34 @@ const updatesLoading = ref(false);
 const loading = ref(false);
 const importing = ref(false);
 const importJob = ref(null); // { running, done, total, expected, currentType, error }
+const autoSync = ref(null); // 自动同步信息 { enabled, intervalMs, running, lastRunAt, nextRunAt, lastResult }
 let importTimer = null;
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+function fmtClock(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+// 「自动同步」一行摘要：默认每 12 小时，由服务端定时器拉取，不依赖本页面打开
+const autoSyncText = computed(() => {
+  const a = autoSync.value;
+  if (!a || !a.enabled) return '';
+  if (a.running) return '🤖 自动同步正在运行，正在从 Bangumi 更新本地收藏…';
+  const hours = Math.round((a.intervalMs || 0) / 3600000);
+  const interval = hours >= 48 ? `约每 ${Math.round((hours / 24) * 10) / 10} 天` : (hours >= 1 ? `约每 ${hours} 小时` : `约每 ${Math.max(1, Math.round((a.intervalMs || 0) / 60000))} 分钟`);
+  const parts = [`🤖 自动同步已开启（${interval}自动从 Bangumi 更新本地收藏）`];
+  if (a.lastRunAt) parts.push(`上次 ${fmtClock(a.lastRunAt)}`);
+  if (a.nextRunAt) parts.push(`下次 ${fmtClock(a.nextRunAt)}`);
+  return parts.join(' · ');
+});
+
+async function loadAutoSync() {
+  try {
+    const d = await api.get('/collections/import/status');
+    autoSync.value = (d && d.autoSync) || null;
+  } catch (e) { autoSync.value = null; }
+}
 
 // 分类顺序贴近 Bangumi：全部、想看、在看、看过、搁置、抛弃
 const tabs = [
@@ -196,6 +223,7 @@ onMounted(() => {
     load();
     loadTags();
     loadUpdates();
+    if (userStore.user.connected && !userStore.viewer) loadAutoSync();
   }
 });
 onUnmounted(() => { if (importTimer) clearTimeout(importTimer); });
@@ -237,6 +265,8 @@ watch(() => route.query.tag, (v) => {
         </div>
       </div>
 
+      <div class="auto-sync-line" v-if="autoSyncText">{{ autoSyncText }}</div>
+
       <div v-if="!updatesLoading && myUpdates.length" class="updates-bar" v-reveal>
         <div class="upd-head">
           <span class="upd-title">📣 你追的番有更新</span>
@@ -262,7 +292,7 @@ watch(() => route.query.tag, (v) => {
       </n-tabs>
 
       <n-alert v-if="listSource === 'bangumi' && bgmTotal > (counts.total || 0)" type="info" :show-icon="false" style="margin:8px 0 2px">
-        🌙 列表实时来自 Bangumi（共 {{ bgmTotal }} 条）· 收藏统计来自本地库（已导入 {{ counts.total || 0 }} 条），点右上角「导入 Bangumi 收藏」后统计即为完整
+        🌙 列表实时来自 Bangumi（共 {{ bgmTotal }} 条）· 收藏统计来自本地库（已导入 {{ counts.total || 0 }} 条）{{ autoSyncText ? '· 已开启自动同步，统计会自动补全' : '· 点右上角「导入 Bangumi 收藏」后统计即为完整' }}
       </n-alert>
 
       <div class="toolbar">
@@ -310,6 +340,7 @@ watch(() => route.query.tag, (v) => {
 .head { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 4px; flex-wrap: wrap; gap: 10px; }
 .head h2 { margin: 0; }
 .actions { display: flex; gap: 8px; }
+.auto-sync-line { font-size: 12px; color: var(--text-dim); margin: 0 0 6px; }
 .toolbar { display: flex; align-items: center; gap: 12px; margin: 12px 0 2px; flex-wrap: wrap; }
 .tag-count { font-size: 13px; }
 .updates-bar { margin: 12px 0 2px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 14px; padding: 12px 14px 8px; }

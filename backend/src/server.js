@@ -22,7 +22,17 @@ app.use(express.json({ limit: '8mb' }));
 // 跨站写请求防护（CSRF 第二道防线：Origin/Referer 校验）
 app.use(originGuard);
 // /api 全局限流（1 核小机防爬/防刷，阈值宽松不影响正常使用）
-app.use('/api', rateLimit({ windowMs: 60 * 1000, max: 300, name: 'api' }));
+// 图片/静态资源（/api/img、/api/newsimg、/api/uploads）拆出独立高额度桶：
+// 它们是浏览器拉取封面/缓存图的主要路径，量级远大于普通 API，且 WAF 层已单独放宽
+// （/api/img 60s/3600）。若仍挤在通用 300 桶里，连续翻页/多人共用出口 IP 时会先于
+// WAF 命中本层 429，表现与本次"图挂了/接口 429"一致。
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 300, name: 'api' });
+const assetLimiter = rateLimit({ windowMs: 60 * 1000, max: 3600, name: 'asset' });
+app.use('/api', (req, res, next) => {
+  const p = (req.originalUrl || '').split('?')[0];
+  if (/^\/api\/(img|newsimg|uploads)(\/|$)/.test(p)) return assetLimiter(req, res, next);
+  return apiLimiter(req, res, next);
+});
 
 // 会话注入
 app.use(async (req, res, next) => {
@@ -189,6 +199,8 @@ app.use((err, req, res, next) => {
     try {
       const collectionsRoute = require('./routes/collections');
       if (typeof collectionsRoute.initSyncQueue === 'function') await collectionsRoute.initSyncQueue();
+      // 追番收藏自动同步：服务端定时把用户 Bangumi 收藏拉回本地（只导入不导出）
+      if (typeof collectionsRoute.startAutoImportScheduler === 'function') collectionsRoute.startAutoImportScheduler();
     } catch (e) {
       logger.error('[collections] queue recovery failed', { message: e.message });
     }

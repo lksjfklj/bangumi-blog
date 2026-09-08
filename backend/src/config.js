@@ -73,6 +73,9 @@ module.exports = {
   // Bangumi 收藏同步：全局同一时刻只跑 1 个同步任务（排队 FIFO 逐个执行）；
   // 同一用户两次同步请求之间至少间隔 BGM_SYNC_COOLDOWN_MS（默认 60 秒），防止反复触发打爆 Bangumi 配额
   bgmSyncCooldownMs: +(env.BGM_SYNC_COOLDOWN_MS || 60000),
+  // 追番收藏「自动同步」周期（毫秒）：服务端定时把用户的 Bangumi 收藏自动拉回本地（导入），
+  // 避免每次都要手动点导入；默认 12 小时一次，设为 0 可关闭（BGM_AUTO_IMPORT_INTERVAL_MS=0）
+  bgmAutoImportIntervalMs: +(env.BGM_AUTO_IMPORT_INTERVAL_MS || 12 * 3600 * 1000),
   // 邮箱注册验证码有效期（毫秒），默认 10 分钟
   mailCodeTtlMs: +(env.MAIL_CODE_TTL_MS || 10 * 60 * 1000),
   // 只读访客（viewer）会话有效期（毫秒），默认 24 小时（普通用户会话仍为 30 天）
