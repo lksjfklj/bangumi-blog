@@ -133,6 +133,53 @@ router.get('/me/collections/tags', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Bangumi v0 API：PATCH /collections/{sid} 只能改「已存在」的收藏，对从未收藏过的条目必须用
+// POST（不存在则创建、存在则更新）。动画的观看进度不能直接写在收藏里（ep_status 仅书籍可用），
+// 必须把「到第 N 话为止的本篇剧集」逐集标记为看过，Bangumi 会自动重算该动画的观看进度。
+async function syncBgmCollection(token, subjectId, subjectType, { type, rate, comment, tags, epStatus } = {}) {
+  const body = {
+    type: Math.min(Math.max(+(type || 1), 1), 5),
+    rate: Math.min(Math.max(Math.round(+(rate || 0)), 0), 10)
+  };
+  if (comment != null) body.comment = String(comment).slice(0, 1000);
+  if (tags != null) body.tags = Array.isArray(tags) ? tags.slice(0, 20).map(String) : [];
+  const isBook = +subjectType === 1;
+  if (isBook && epStatus != null) body.ep_status = Math.max(0, Math.round(+(epStatus || 0)));
+  // 先确保收藏本体存在（创建或更新），动画随后再标记剧集
+  await bgm(`/v0/users/-/collections/${subjectId}`, { method: 'POST', token, body });
+  if (!isBook && epStatus != null && +epStatus > 0) {
+    await markBgmEpisodesWatched(token, subjectId, +epStatus);
+  }
+}
+
+// 拉取条目全部本篇剧集（sort 升序），把 sort <= epStatus 的集批量标记为看过(type=2)。
+// epStatus 与页面上点击的剧集 sort 同一口径（如跨季条目 sort 可能是 73~80），逐集标记后
+// Bangumi 端会按已看的本篇集数重算收藏进度，不能直接把 80 之类的总数塞给 ep_status。
+async function markBgmEpisodesWatched(token, subjectId, epStatus) {
+  const episodeIds = [];
+  let offset = 0;
+  let safety = 0;
+  for (;;) {
+    if (++safety > 50) break; // 防御异常条目：最多拉 5000 集
+    const data = await bgm(`/v0/episodes?subject_id=${subjectId}&offset=${offset}&limit=100`, { token });
+    const list = (data && data.data) || [];
+    for (const ep of list) {
+      if (ep && ep.id && +ep.sort > 0 && +ep.sort <= epStatus && (ep.type == null || +ep.type === 0)) {
+        episodeIds.push(ep.id);
+      }
+    }
+    const total = (data && data.total != null) ? +data.total : offset + list.length;
+    offset += list.length;
+    if (!list.length || offset >= total) break;
+    await sleep(120); // 多页稍作间隔，避免打爆 Bangumi 限流
+  }
+  if (!episodeIds.length) return;
+  await bgm(`/v0/users/-/collections/${subjectId}/episodes`, {
+    method: 'PATCH', token,
+    body: { episode_id: episodeIds, type: 2 }
+  });
+}
+
 // 设置收藏状态（写 Bangumi + 本地）
 router.put('/collections/:subjectId', async (req, res, next) => {
   try {
@@ -151,23 +198,19 @@ router.put('/collections/:subjectId', async (req, res, next) => {
       localRow = rows[0] || null;
       if (localRow) subjectType = +localRow.subject_type || subjectType;
     }
-    // Bangumi v0 API 约束：type 1-5、rate 0-10 整数、仅书籍条目允许设置 vol_status/ep_status
+    // Bangumi v0 API 约束：type 1-5、rate 0-10 整数（收藏的创建/更新/进度统一走 syncBgmCollection）
     const type = Math.min(Math.max(+(status || 1), 1), 5);
     const rate = Math.min(Math.max(Math.round(+(score || 0)), 0), 10);
-    const body = {
-      type,
-      rate,
-      ...(comment != null ? { comment: String(comment).slice(0, 1000) } : {}),
-      ...(tags != null ? { tags: Array.isArray(tags) ? tags.slice(0, 20).map(String) : [] } : {})
-    };
-    if (subjectType === 1 && epStatus != null) {
-      body.ep_status = Math.max(0, Math.round(+(epStatus || 0)));
-    }
     // Bangumi 推送失败不阻塞本地保存（返回 bgmSynced 供前端提示）
     let bgmSynced = false;
     if (token) {
       try {
-        await bgm(`/v0/users/-/collections/${subjectId}`, { method: 'PATCH', token, body });
+        await syncBgmCollection(token, subjectId, subjectType, {
+          type, rate,
+          ...(comment != null ? { comment } : {}),
+          ...(tags != null ? { tags } : {}),
+          ...(epStatus != null ? { epStatus } : {})
+        });
         bgmSynced = true;
       } catch (e) { /* 忽略：本地仍保存 */ }
     }
@@ -428,18 +471,15 @@ async function runBgmExport(userId, user) {
   try {
     for (const c of rows) {
       try {
-        const body = {
-          type: Math.min(Math.max(+(c.status || 1), 1), 5),
-          rate: Math.min(Math.max(Math.round(+(c.score || 0)), 0), 10),
-          comment: c.comment || '',
-          tags: (() => {
-            try { const a = JSON.parse(c.tags || '[]'); return Array.isArray(a) ? a.slice(0, 20).map(String) : []; }
-            catch (e) { return []; }
-          })()
-        };
-        if (+c.subject_type === 1) body.ep_status = Math.max(0, Math.round(+(c.ep_status || 0)));
-        await bgm(`/v0/users/-/collections/${c.subject_id}`, { method: 'PATCH', token, body });
+        const tags = (() => {
+          try { const a = JSON.parse(c.tags || '[]'); return Array.isArray(a) ? a.slice(0, 20).map(String) : []; }
+          catch (e) { return []; }
+        })();
+        await syncBgmCollection(token, c.subject_id, +c.subject_type || 2, {
+          type: c.status, rate: c.score, comment: c.comment || '', tags, epStatus: c.ep_status || 0
+        });
         pushed++;
+        await sleep(120); // 逐条稍作间隔，避免触发 Bangumi 限流
       } catch (e) { /* 单条失败跳过，不中断整体导出 */ }
       job.done = pushed;
     }

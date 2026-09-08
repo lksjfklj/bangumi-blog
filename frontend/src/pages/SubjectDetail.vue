@@ -379,7 +379,7 @@ watch(subject, (sVal) => {
         </div>
         <div class="field">
           <label>评分 (0-10)</label>
-          <n-rate v-model:value="editForm.score" :max="10" clearable />
+          <n-rate v-model:value="editForm.score" :count="10" clearable />
           <span class="muted" style="margin-left:8px">{{ editForm.score }}</span>
         </div>
         <div class="field">
