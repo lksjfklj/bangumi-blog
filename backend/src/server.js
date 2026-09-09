@@ -215,7 +215,24 @@ app.use((err, req, res, next) => {
   library.startScheduler();
   require('./releasecal').startScheduler(); // Galgame 新作发售日历（VNDB）：启动 20s 后首扫 + 每 6h 增量
   require('./bookrelease').startScheduler(); // 漫画/轻小说 新作发售日历（Bangumi date 流）：启动 20s 后首扫 + 每 6h 增量
-  app.listen(config.port, config.host, () => {
+  const server = app.listen(config.port, config.host, () => {
     logger.info('[server] listening', { port: config.port, host: config.host, node: process.version });
   });
+
+  // 小内存机自我保护：RSS 超过阈值时优雅重启（systemd Restart=always 会自动拉起新进程）
+  // 背景：node:sqlite/sharp 等原生内存随定时任务(资讯/日历/追番)累积，malloc 不会主动归还，
+  // 长期运行 RSS 会从 ~160MB 缓慢涨到 400MB+。定期重启可把常驻内存压回低位。
+  // 可用 MEM_RESTART_MB=0 关闭，默认 400MB。
+  const memRestartMB = Math.min(1024, Math.max(0, Number(process.env.MEM_RESTART_MB) || 400));
+  if (memRestartMB > 0) {
+    const memTimer = setInterval(() => {
+      const rssMB = Math.round(process.memoryUsage().rss / 1048576);
+      if (rssMB > memRestartMB) {
+        logger.warn('[mem] rss over limit, graceful restart', { rssMB, limitMB: memRestartMB });
+        try { server.close(() => process.exit(0)); } catch (e) { process.exit(0); }
+        setTimeout(() => process.exit(0), 8000).unref();
+      }
+    }, 60 * 1000);
+    memTimer.unref();
+  }
 })();
