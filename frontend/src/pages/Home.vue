@@ -20,12 +20,16 @@ const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
 const dayList = computed(() => calendar.value[activeDay.value - 1] || null);
 
 // 收藏番放送进度：第 ep_status / 共 eps 话
+// 注意 ep_status 是「本篇剧集 sort」口径：跨季/长篇条目的 sort 会大于该条目自身话数
+// （如 Re:Zero 第四季 sort 78~85 而 eps=8），按 sort/eps 算比例会得到「第 85/8 话」+满格进度条，
+// 这时只显示看到第几话、不画进度线。
 function progressOf(s) {
   const p = progressMap.value[s.id];
   if (!p || !p.ep_status) return null;
-  const total = +s.eps || 0;
   const cur = +p.ep_status || 0;
-  return { cur, total, pct: total ? Math.min(100, Math.round(cur / total * 100)) : 0 };
+  const total = +s.eps || 0;
+  if (!total || cur > total) return { cur, total: 0, pct: null, text: '看到第 ' + cur + ' 话' };
+  return { cur, total, pct: Math.min(100, Math.round(cur / total * 100)), text: '第 ' + cur + '/' + total + ' 话' };
 }
 // 开播倒计时：air_date 在未来 14 天内
 function countdownOf(s) {
@@ -126,7 +130,7 @@ onMounted(() => {
                 :subject="s"
                 :calendar="true"
                 :progress-pct="progressOf(s) ? progressOf(s).pct : null"
-                :progress-text="progressOf(s) ? '第 ' + progressOf(s).cur + '/' + (progressOf(s).total || '?') + ' 话' : ''"
+                :progress-text="progressOf(s) ? progressOf(s).text : ''"
               />
               <div v-if="!progressOf(s) && countdownOf(s)" class="cal-countdown">⏳ {{ countdownOf(s) }}</div>
             </div>

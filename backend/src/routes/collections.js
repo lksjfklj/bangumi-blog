@@ -219,11 +219,20 @@ async function bgmEpCountToLocalSort(token, subjectId, subjectType, bgmEpStatus)
 }
 
 // 当前用户该条目的逐集观看状态：episode.id -> type（2=看过，其余按未看处理）
+// 必须分页：该接口默认 limit=100（如银魂 201 集只返回前 100 集），只读第一页会导致
+// 后半段已看集读不到，倒回进度/取消看过时漏掉这些集（表现为「进度回退无效」）。
 async function fetchEpisodeStates(token, subjectId) {
   const map = new Map();
-  const data = await bgm(`/v0/users/-/collections/${subjectId}/episodes`, { token });
-  for (const it of (data && data.data) || []) {
-    if (it && it.episode && it.episode.id) map.set(it.episode.id, +it.type || 0);
+  let offset = 0;
+  for (let safety = 0; safety < 100; safety++) { // 防御异常条目：最多 100 页（10000 集）
+    const data = await bgm(`/v0/users/-/collections/${subjectId}/episodes?limit=100&offset=${offset}`, { token });
+    const list = (data && data.data) || [];
+    for (const it of list) {
+      if (it && it.episode && it.episode.id) map.set(it.episode.id, +it.type || 0);
+    }
+    offset += list.length;
+    if (!list.length || offset >= ((data && data.total != null) ? +data.total : offset)) break;
+    await sleep(120); // 多页稍作间隔，避免触发 Bangumi 限流
   }
   return map;
 }
@@ -283,7 +292,9 @@ router.put('/collections/:subjectId', async (req, res, next) => {
     const rate = Math.min(Math.max(Math.round(+(score || 0)), 0), 10);
     // 未显式传进度时沿用本地已有进度（只改状态/评分/评论不应清空观看进度）
     const ep = epStatus != null ? Math.max(0, Math.round(+(epStatus || 0))) : (localRow ? +localRow.ep_status || 0 : 0);
-    const tagsArr = Array.isArray(tags) ? tags.slice(0, 20).map(String) : [];
+    // tags 未显式传入（undefined）时沿用本地已有标签：点击剧集只改进度，不能顺手把本地标签清空。
+    // 只有显式传数组时才覆盖（空数组=清空），与 Bangumi 侧「不传就不动」的行为保持一致。
+    const tagsArr = Array.isArray(tags) ? tags.slice(0, 20).map(String) : parseTags(localRow && localRow.tags);
     const name = subject ? (subject.name || '') : (localRow ? localRow.name : '');
     const nameCn = subject ? (subject.name_cn || '') : (localRow ? localRow.name_cn : '');
     const image = subject && subject.images ? (subject.images.common || '') : (localRow ? localRow.image : '');
@@ -513,26 +524,37 @@ async function insertBgmItems(conn, userId, items, subjectType, token) {
 // Bangumi 侧删除了收藏时本地也要跟着删：否则「全部」Tab 计数、导出备份里会留下
 // Bangumi 上已经不存在的「幽灵条目」（表现为计数比列表多、导出比列表多）。
 // 只清理 sync_dirty=0 的行：本地改动还没推成功（dirty）的条目必须保留，等下次补推。
-async function pruneDeletedOnBgm(userId, seenIds) {
-  const [rows] = await pool.query(
-    'SELECT subject_id FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0',
-    [userId]
-  );
-  const stale = [];
-  for (const r of rows || []) {
-    const id = +r.subject_id;
-    if (!seenIds.has(id)) stale.push(id);
+// 另外必须用「导入开始时的快照」二次确认（snapshot: subject_id -> updated_at）：
+// 导入期间用户新增/修改的收藏（PUT 已写回 Bangumi，但不在本轮已拉过的分页里）不在 seenIds 中，
+// 若不比对快照就会被当成「Bangumi 侧已删除」而误删。
+async function pruneDeletedOnBgm(userId, seenIds, snapshot) {
+  if (!snapshot || !snapshot.size) return 0;
+  const candidates = [];
+  for (const id of snapshot.keys()) {
+    if (!seenIds.has(id)) candidates.push(id);
   }
-  if (!stale.length) return 0;
-  for (let i = 0; i < stale.length; i += 200) {
-    const chunk = stale.slice(i, i + 200);
-    await pool.query(
-      `DELETE FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0 AND subject_id IN (${chunk.map(() => "?").join(",")})`,
+  if (!candidates.length) return 0;
+  let deleted = 0;
+  for (let i = 0; i < candidates.length; i += 200) {
+    const chunk = candidates.slice(i, i + 200);
+    const ph = chunk.map(() => "?").join(",");
+    const [rows] = await pool.query(
+      `SELECT subject_id, updated_at FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0 AND subject_id IN (${ph})`,
       [userId, ...chunk]
     );
+    // 只删「快照里就在、至今没被改过、仍未推脏」的行；updated_at 变了说明期间有用户操作，必须保留
+    const doomed = (rows || [])
+      .filter(r => +r.updated_at === snapshot.get(+r.subject_id))
+      .map(r => +r.subject_id);
+    if (!doomed.length) continue;
+    const [r] = await pool.query(
+      `DELETE FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0 AND subject_id IN (${doomed.map(() => "?").join(",")})`,
+      [userId, ...doomed]
+    );
+    deleted += (r && r.affectedRows) || 0;
   }
-  console.log('[collections] pruned', stale.length, 'local collection(s) no longer on Bangumi for user', userId);
-  return stale.length;
+  if (deleted) console.log('[collections] pruned', deleted, 'local collection(s) no longer on Bangumi for user', userId);
+  return deleted;
 }
 
 // 导入/自动同步开始前，先把本地待重推(sync_dirty=1)的收藏补推给 Bangumi：
@@ -575,6 +597,18 @@ async function runBgmImport(userId, user) {
     job.error = 'Bangumi 未连接或授权已失效';
     return;
   }
+  // 导入前先给「本地已同步」的行拍快照（subject_id -> updated_at）：清理阶段只删快照里存在、
+  // 且期间没被用户改动过的行，避免把导入期间新增/修改的收藏误删（见 pruneDeletedOnBgm）。
+  const pruneSnapshot = new Map();
+  try {
+    const [snapRows] = await pool.query(
+      'SELECT subject_id, updated_at FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0',
+      [userId]
+    );
+    for (const r of snapRows || []) pruneSnapshot.set(+r.subject_id, +r.updated_at || 0);
+  } catch (e) {
+    console.error('[collections] prune snapshot failed for user', userId, ':', e.message);
+  }
   // 先补推本地待重推(pending)的改动：成功后清 dirty；仍失败保留 dirty，下方导入会跳过这些条目，
   // 避免用 Bangumi 的旧数据覆盖用户刚改完、还没推成功的本地修改。
   try {
@@ -614,7 +648,7 @@ async function runBgmImport(userId, user) {
       }
     }
     // Bangumi 是收藏「存在性」的权威源：BGM 侧取消收藏后，本地同步删除（见 pruneDeletedOnBgm）
-    job.pruned = complete ? await pruneDeletedOnBgm(userId, seenIds) : 0;
+    job.pruned = complete ? await pruneDeletedOnBgm(userId, seenIds, pruneSnapshot) : 0;
     job.total = job.done;
   } catch (e) {
     job.error = e.message || '导入失败';
@@ -721,10 +755,12 @@ async function autoImportOnce() {
   const result = { users: 0, enqueued: 0, skipped: 0 };
   try {
     const [rows] = await pool.query(
+      // 按「最久没同步」排序：每轮只入队 AUTO_SYNC_MAX_JOBS 个用户，若按 id 排序，
+      // 用户数超过上限时后面的用户永远排不上（会被前面的用户每轮抢占）。
       `SELECT id FROM users
        WHERE bangumi_uid IS NOT NULL
          AND (access_token IS NOT NULL AND access_token <> '' OR refresh_token IS NOT NULL AND refresh_token <> '')
-       ORDER BY id`
+       ORDER BY COALESCE(last_collection_sync_at, 0) ASC, id ASC`
     );
     result.users = rows.length;
     for (const u of rows) {

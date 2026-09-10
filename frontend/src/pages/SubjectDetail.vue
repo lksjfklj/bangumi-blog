@@ -34,6 +34,7 @@ const id = computed(() => +route.params.id);
 const subject = ref(null);
 const episodes = ref([]);
 const epsTotal = ref(0);
+const epsLoading = ref(false); // 章节分页加载中（长篇条目 >200 集时点击「加载更多」）
 const characters = ref([]);
 const staff = ref([]);
 const related = ref([]);
@@ -93,13 +94,20 @@ const infoLines = computed(() => {
 
 // 章节最大序号：跨季条目的 sort 可能是 78~85 而非 1~8，进度上限按实际序号算
 const maxEpSort = computed(() => episodes.value.reduce((m, e) => Math.max(m, +e.sort || 0), 0));
+// 只有「本篇」剧集参与追番进度：特别篇/OP/ED 的 sort 会和本篇重叠（如钢炼 SP 的 sort=1），
+// 误点会把进度倒回到 1 并取消后面所有本篇的「看过」，所以非本篇只展示、不可点。
+function isMainEp(ep) { return !!ep && (ep.type == null || +ep.type === 0); }
 const epsWithStatus = computed(() => {
   const epStatus = collection.value ? +collection.value.ep_status : 0;
-  return episodes.value.map((ep, i) => ({
-    ...ep,
-    done: ep.sort <= epStatus,
-    isCur: ep.sort === epStatus + 1
-  }));
+  return episodes.value.map((ep) => {
+    const main = isMainEp(ep);
+    return {
+      ...ep,
+      sp: !main,
+      done: main && ep.sort <= epStatus,
+      isCur: main && ep.sort === epStatus + 1
+    };
+  });
 });
 
 async function loadSubject() {
@@ -115,7 +123,7 @@ async function loadSubject() {
   try {
     const [s, eps, chars, stf, rel] = await Promise.all([
       api.get('/anime/subjects/' + id.value),
-      api.get('/anime/subjects/' + id.value + '/episodes?limit=200').catch(() => ({ data: [], total: 0 })),
+      api.get('/anime/subjects/' + id.value + '/episodes?limit=200&offset=0').catch(() => ({ data: [], total: 0 })),
       api.get('/anime/subjects/' + id.value + '/characters').catch(() => ({ data: [] })),
       api.get('/anime/subjects/' + id.value + '/persons').catch(() => ({ data: [] })),
       api.get('/anime/subjects/' + id.value + '/related').catch(() => ({ data: [] }))
@@ -133,6 +141,28 @@ async function loadSubject() {
   }
   loading.value = false;
   loadCollection();
+}
+
+// 长篇条目（海贼王/柯南/银魂等）章节数远超单次上限 200 集：
+// 首次只拉 200 条，点「加载更多章节」按 offset 继续追加，否则第 200 话之后的
+// 集数根本不显示，也就无法在网站上把进度点到/倒回到后面的集数。
+async function loadMoreEps() {
+  if (epsLoading.value) return;
+  const offset = episodes.value.length;
+  if (!offset || offset >= epsTotal.value) return;
+  epsLoading.value = true;
+  try {
+    const d = await api.get('/anime/subjects/' + id.value + '/episodes?limit=200&offset=' + offset);
+    const more = (d && d.data) || [];
+    if (d && d.total) epsTotal.value = d.total;
+    if (more.length) {
+      const seen = new Set(episodes.value.map(e => e.id));
+      episodes.value = episodes.value.concat(more.filter(e => e && !seen.has(e.id)));
+    }
+  } catch (e) {
+    message.error('章节加载失败：' + (e.message || e));
+  }
+  epsLoading.value = false;
 }
 
 async function loadCollection() {
@@ -175,7 +205,13 @@ async function saveCollection() {
 
 async function markEp(ep) {
   if (!userStore.user) { login(); return; }
+  if (userStore.viewer) { message.warning('只读访客模式，不能修改追番进度'); return; }
+  if (!isMainEp(ep)) { message.info('特别篇 / OP / ED 不计入追番进度，请在 Bangumi 上单独标记'); return; }
   const epStatus = ep.sort;
+  // 刻意不带 tags：只改进度时不要把标签传给 Bangumi。
+  // 本地 tags 可能落后于 Bangumi（BGM 侧新打的标签要等下次导入才同步下来），
+  // 若把本地（可能为空）的 tags 一起推上去，会把 Bangumi 上刚打的标签清空。
+  // 后端约定：tags 未显式传入 => 保留本地原值且不动 Bangumi。
   editForm.value = {
     status: collection.value?.status || 3,
     score: collection.value?.score || 0,
@@ -292,14 +328,17 @@ watch(subject, (sVal) => {
 
             <div class="block">
               <div class="block-title">章节 ({{ epsTotal }})</div>
-              <div v-if="episodes.length && userStore.user && !userStore.viewer" class="ep-hint">点击未看集数可更新进度到该话；点击已看集数可回退进度（取消之后集数的看过），修改会同步到 Bangumi。</div>
+              <div v-if="episodes.length && userStore.user && !userStore.viewer" class="ep-hint">点击本篇未看集数可更新进度到该话；点击已看集数可回退进度（取消之后集数的看过），修改会同步到 Bangumi。特别篇 / OP / ED 不计入进度。</div>
               <div v-if="episodes.length" class="ep-list">
-                <div v-for="ep in epsWithStatus" :key="ep.id" class="ep-item" :class="{ done: ep.done, cur: ep.isCur }"
-                  :title="ep.name_cn || ep.name" @click="markEp(ep)">
+                <div v-for="ep in epsWithStatus" :key="ep.id" class="ep-item" :class="{ done: ep.done, cur: ep.isCur, sp: ep.sp }"
+                  :title="(ep.sp ? '特别篇/其他（不计入追番进度）：' : '') + (ep.name_cn || ep.name || '')" @click="markEp(ep)">
                   {{ ep.sort }}<span v-if="ep.name_cn || ep.name" class="ep-name">{{ ep.name_cn || ep.name }}</span>
                 </div>
               </div>
-              <n-empty v-else description="暂无章节" :show-icon="false" style="padding:20px" />
+              <div v-if="episodes.length && episodes.length < epsTotal" class="ep-more">
+                <n-button size="small" :loading="epsLoading" @click="loadMoreEps">加载更多章节（已显示 {{ episodes.length }} / {{ epsTotal }}）</n-button>
+              </div>
+              <n-empty v-if="!episodes.length" description="暂无章节" :show-icon="false" style="padding:20px" />
             </div>
 
             <div v-if="characters.length" class="block">
@@ -426,6 +465,8 @@ watch(subject, (sVal) => {
 .block-title { font-weight: 700; margin-bottom: 12px; }
 .block-title::before { content: '✿ '; color: var(--accent); }
 .ep-hint { font-size: 12px; color: var(--text-dim); margin: -2px 0 10px; line-height: 1.5; }
+.ep-item.sp { opacity: .7; cursor: help; border-style: dashed; }
+.ep-more { display: flex; justify-content: center; margin-top: 10px; }
 .info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .info-table td { padding: 5px 8px; vertical-align: top; }
 .info-table .k { color: var(--text-dim); width: 90px; white-space: nowrap; }
