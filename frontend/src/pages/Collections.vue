@@ -210,6 +210,7 @@ async function markAllRead() {
   try {
     await api.post('/watch/updates/read', {});
     unreadCount.value = 0;
+    window.dispatchEvent(new Event('bb:updates-read'));
     message.success('已全部标记为已读');
     loadUpdates();
   } catch (e) { message.error(e.message); }

@@ -70,8 +70,16 @@ watch(() => userStore.user, (u) => {
     clearInterval(unreadTimer);
   }
 }, { immediate: true });
-onMounted(() => { if (userStore.user) fetchUnread(); });
-onUnmounted(() => clearInterval(unreadTimer));
+// 「全部已读」后立即清角标，不用等下一次轮询
+function onUpdatesRead() { unread.value = 0; }
+onMounted(() => {
+  if (userStore.user) fetchUnread();
+  window.addEventListener('bb:updates-read', onUpdatesRead);
+});
+onUnmounted(() => {
+  clearInterval(unreadTimer);
+  window.removeEventListener('bb:updates-read', onUpdatesRead);
+});
 </script>
 
 <template>
