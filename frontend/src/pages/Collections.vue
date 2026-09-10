@@ -267,11 +267,12 @@ watch(() => route.query.tag, (v) => {
           <span class="upd-title">📣 你追的番有更新</span>
           <n-tag v-if="unreadCount" size="small" type="error" round :bordered="false">{{ unreadCount }} 条未读</n-tag>
           <span class="spacer"></span>
-          <n-button v-if="!userStore.viewer" text type="primary" size="small" @click="markAllRead">全部已读</n-button>
+          <n-button v-if="!userStore.viewer && unreadCount" text type="primary" size="small" @click="markAllRead">全部已读</n-button>
           <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
         </div>
         <div class="upd-list">
           <router-link v-for="u in myUpdates" :key="u.series_key" :to="{ path: '/watch', query: { my: '1', q: u.series_title || u.name_cn || u.name } }" class="upd-item" :title="'查看 ' + (u.name_cn || u.name || u.series_title) + ' 的更新'">
+            <span v-if="+u.unread > 0" class="upd-dot" title="未读更新"></span>
             <span class="upd-name">{{ u.name_cn || u.name || u.series_title }}</span>
             <n-tag v-if="u.episode" size="small" :bordered="false" type="warning" round>{{ episodeLabel(u.episode) }}</n-tag>
             <span class="spacer"></span>
@@ -350,6 +351,7 @@ watch(() => route.query.tag, (v) => {
 .upd-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 2px; border-bottom: 1px dashed var(--border); text-decoration: none; color: inherit; }
 .upd-item:last-child { border-bottom: none; }
 .upd-item:hover .upd-name { color: var(--accent); }
+.upd-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-4); flex: none; box-shadow: 0 0 0 3px rgba(255,125,156,.16); }
 .upd-name { font-size: 13px; font-weight: 600; color: var(--text); }
 .upd-time { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .import-box { padding: 4px 2px; }

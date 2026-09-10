@@ -20,8 +20,14 @@ router.get('/updates/unread', async (req, res, next) => {
       "WHERE wu.user_id = ? ORDER BY wu.id DESC LIMIT ?",
       [req.user.id, limit]
     );
+    // 未读数必须单独 COUNT：上面的 LIMIT 只用于列表数据，
+    // 若在 limit 之后统计，调用方传 limit=1 时角标永远最多只显示 1。
+    const [cnt] = await pool.query(
+      'SELECT COUNT(*) AS n FROM watch_updates WHERE user_id = ? AND read = 0',
+      [req.user.id]
+    );
     res.set('Cache-Control', 'no-store');
-    res.json({ unread: rows.filter(r => !r.read).length, total: rows.length, data: rows });
+    res.json({ unread: +((cnt[0] && cnt[0].n) || 0), total: rows.length, data: rows });
   } catch (e) { next(e); }
 });
 

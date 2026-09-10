@@ -110,6 +110,7 @@ onMounted(() => {
       </div>
       <div class="mu-list">
         <router-link v-for="u in myUpdates" :key="u.series_key" :to="{ path: '/watch', query: { my: '1', q: u.series_title || u.name_cn || u.name } }" class="mu-item" :title="'查看 ' + (u.name_cn || u.name || u.series_title) + ' 的更新'">
+          <span v-if="+u.unread > 0" class="mu-dot" title="未读更新"></span>
           <span class="mu-name">{{ u.name_cn || u.name || u.series_title }}</span>
           <n-tag v-if="u.episode" size="small" :bordered="false" type="warning" round>{{ episodeLabel(u.episode) }}</n-tag>
           <n-tag v-if="u.sub_group" size="small" :bordered="false" round>{{ u.sub_group }}</n-tag>
@@ -255,6 +256,7 @@ onMounted(() => {
 .mu-item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 4px; border-bottom: 1px dashed var(--border); text-decoration: none; color: inherit; }
 .mu-item:last-child { border-bottom: none; }
 .mu-item:hover .mu-name { color: var(--accent); }
+.mu-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-4); flex: none; box-shadow: 0 0 0 3px rgba(255,125,156,.16); }
 .mu-name { font-size: 13px; font-weight: 600; color: var(--text); }
 .mu-time { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .post-card {

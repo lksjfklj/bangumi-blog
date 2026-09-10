@@ -668,7 +668,8 @@ router.get('/groups', async (req, res, next) => {
         }))
       });
     }
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
+    // 带 my=1 时结果取决于登录用户，不能进公共缓存（否则切账号/只读访客会串数据）
+    res.set('Cache-Control', req.query.my === '1' ? 'private, no-store' : 'public, max-age=60, s-maxage=60');
     res.json({ data, total: cnt[0].total, page, size });
   } catch (e) { next(e); }
 });
@@ -708,7 +709,8 @@ router.get('/episodes', async (req, res, next) => {
       [...f.args, size, offset]
     );
     const [cnt] = await pool.query('SELECT COUNT(*) AS total FROM anime_episodes' + f.where, f.args);
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
+    // 带 my=1 时结果取决于登录用户，不能进公共缓存
+    res.set('Cache-Control', req.query.my === '1' ? 'private, no-store' : 'public, max-age=60, s-maxage=60');
     res.json({ data: rows, total: cnt[0].total, page, size });
   } catch (e) { next(e); }
 });
@@ -722,9 +724,11 @@ router.get('/my-updates', async (req, res, next) => {
     const [rows] = await pool.query(
       `SELECT c.subject_id, c.name, c.name_cn, c.image,
               e.series_key, e.series_title, e.episode, e.sub_group, e.quality, e.published_at, e.magnet, e.link,
-              c.status
+              c.status,
+              SUM(CASE WHEN wu.id IS NOT NULL AND wu.read = 0 THEN 1 ELSE 0 END) AS unread
        FROM collections c
        JOIN anime_episodes e ON e.bgm_subject_id = c.subject_id
+       LEFT JOIN watch_updates wu ON wu.user_id = c.user_id AND wu.episode_id = e.id
        WHERE c.user_id = ? AND c.status IN (1,3)
          AND e.published_at >= datetime('now', '-30 days')
        GROUP BY c.subject_id, e.series_key
@@ -732,7 +736,9 @@ router.get('/my-updates', async (req, res, next) => {
        LIMIT ?`,
       [req.user.id, limit]
     );
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
+    // 这是个人数据，绝不能 public 缓存：否则同一浏览器切换账号 / 进入只读访客后
+    // 在 max-age 内仍会命中上一位身份的响应（同学切到站长视角看到的还是自己的号即此因）。
+    res.set('Cache-Control', 'private, no-store');
     res.json({ data: rows, total: rows.length });
   } catch (e) { next(e); }
 });

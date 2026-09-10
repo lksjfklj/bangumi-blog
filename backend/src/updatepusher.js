@@ -32,7 +32,10 @@ async function detectUpdates() {
   try { lastId = srow.length ? parseInt(srow[0].value, 10) || 0 : 0; } catch (e) { lastId = 0; }
 
   const lookback = lastId > 0 ? 'AND e.created_at >= datetime(\'now\', \'-3 days\')' : 'AND e.created_at >= datetime(\'now\', ?)';
-  const args = lastId > 0 ? [lastId] : ['-' + FIRST_RUN_LOOKBACK_DAYS + ' days'];
+  // 注意：SQL 里 `e.id > ?` 恒在，首轮分支也必须把 lastId 放进参数数组。
+  // 曾经漏掉导致参数错位成 e.id > '-7 days'（SQLite 中整数恒小于文本），
+  // 查询永远返回 0 行 → 游标永久卡在 0 → watch_updates 一条都写不进来。
+  const args = lastId > 0 ? [lastId] : [lastId, '-' + FIRST_RUN_LOOKBACK_DAYS + ' days'];
   const [eps] = await pool.query(
     `SELECT e.id AS episode_id, e.bgm_subject_id AS subject_id, e.series_title,
             e.episode, e.sub_group, e.quality, e.magnet, e.link, e.published_at
