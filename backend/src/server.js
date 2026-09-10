@@ -45,9 +45,12 @@ app.use(async (req, res, next) => {
 // /api 响应默认不缓存。部分接口返回的内容随"当前身份（登录用户 / 只读访客）"变化，
 // 一旦漏设 Cache-Control，浏览器会按启发式规则复用上一位身份的响应
 // （同学切到站长视角后仍看到自己号的「你追的番有更新」列表，就属这类串身份问题）。
-// 需要公共缓存的接口在路由里显式 res.set('Cache-Control', 'public, ...') 覆盖即可：
-// 路由里的设置晚于这里执行，会优先生效。
+// 说明：/api 下的图片、上传文件与资讯封面静态资源必须跳过这里 ——
+// express.static / res.sendFile 只在 Cache-Control 尚未设置时才会写入自己的长缓存头，
+// 提前设成 no-store 会让封面图无法被浏览器复用、翻页时重复拉图，反而放大流量限制风险。
 app.use('/api', (req, res, next) => {
+  const p = (req.originalUrl || '').split('?')[0];
+  if (/^\/api\/(img|newsimg|uploads)(\/|$)/.test(p)) return next();
   res.set('Cache-Control', 'no-store');
   next();
 });
