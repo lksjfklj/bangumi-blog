@@ -7,7 +7,10 @@ const props = defineProps({
   subject: { type: Object, required: true },
   tags: { type: Array, default: () => [] },
   subjectTags: { type: Array, default: () => [] },
-  calendar: { type: Boolean, default: false }
+  calendar: { type: Boolean, default: false },
+  // 放送进度：pct 0-100（null 时不显示进度线），text 形如「第 80/100 话」
+  progressPct: { type: Number, default: null },
+  progressText: { type: String, default: '' }
 });
 const allTags = computed(() => {
   const seen = new Set();
@@ -67,6 +70,8 @@ function goTag(t, e) {
       <div v-else class="no-cover">{{ name.slice(0, 2) }}</div>
       <span v-if="typeLabel" class="badge">{{ typeLabel }}</span>
       <span v-if="subject.rating && subject.rating.total" class="score">{{ scoreText(subject.rating.score) }}</span>
+      <span v-if="progressText" class="watch-progress" :title="progressText">{{ progressText }}</span>
+      <div v-if="progressPct !== null" class="cover-progress"><i :style="{ width: progressPct + '%' }"></i></div>
     </div>
     <div class="info">
       <div class="title" :title="subject.name">{{ name }}</div>
@@ -84,4 +89,14 @@ a.subject-card { text-decoration: none; color: inherit; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .card-tags .tag { font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 999px; background: var(--src-tag-bg); color: var(--src-tag-text); border: 1px solid var(--src-tag-border); }
 .card-tags .tag:hover { background: var(--accent); border-color: var(--accent); color: var(--grad-text); transform: translateY(-1px); }
+/* 封面内放送进度：左下角话数徽章（评分在右下角，左右对称、不遮挡标题） */
+.cover .watch-progress {
+  position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 64px);
+  font-size: 11px; font-weight: 700; line-height: 1; padding: 4px 8px; border-radius: 999px;
+  color: #fff; background: rgba(0, 0, 0, .62); border: 1px solid rgba(255, 255, 255, .18);
+  backdrop-filter: blur(4px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 封面底边细进度线：整宽贴合，不会被裁切 */
+.cover .cover-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(0, 0, 0, .42); }
+.cover .cover-progress > i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
 </style>

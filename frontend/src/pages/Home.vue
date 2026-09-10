@@ -122,12 +122,13 @@ onMounted(() => {
         <n-tab-pane v-for="(day, i) in calendar" :key="i" :name="i + 1" :tab="'周' + WEEK[i]">
           <div v-if="day.items && day.items.length" class="card-grid">
             <div v-for="s in day.items.slice(0, 24)" :key="s.id" class="cal-cell">
-              <SubjectCard :subject="s" :calendar="true" />
-              <div v-if="progressOf(s)" class="cal-progress" :title="'看到第 ' + progressOf(s).cur + ' 话 / 共 ' + (progressOf(s).total || '?') + ' 话'">
-                <div class="cp-track"><div class="cp-fill" :style="{ width: progressOf(s).pct + '%' }"></div></div>
-                <span class="cp-txt">第 {{ progressOf(s).cur }}/{{ progressOf(s).total || '?' }} 话</span>
-              </div>
-              <div v-else-if="countdownOf(s)" class="cal-countdown">⏳ {{ countdownOf(s) }}</div>
+              <SubjectCard
+                :subject="s"
+                :calendar="true"
+                :progress-pct="progressOf(s) ? progressOf(s).pct : null"
+                :progress-text="progressOf(s) ? '第 ' + progressOf(s).cur + '/' + (progressOf(s).total || '?') + ' 话' : ''"
+              />
+              <div v-if="!progressOf(s) && countdownOf(s)" class="cal-countdown">⏳ {{ countdownOf(s) }}</div>
             </div>
           </div>
           <n-empty v-else description="暂无放送" />
@@ -262,13 +263,7 @@ onMounted(() => {
 .post-card .summary { color: var(--text-dim); font-size: 13px; margin-bottom: 8px; }
 .post-card .meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
 .cal-cell { position: relative; }
-.cal-progress {
-  position: absolute; left: 8px; right: 8px; bottom: 46px; display: flex; align-items: center; gap: 6px;
-  background: rgba(0,0,0,.62); backdrop-filter: blur(4px); border-radius: 999px; padding: 3px 8px;
-}
-.cp-track { flex: 1; height: 5px; background: rgba(255,255,255,.22); border-radius: 999px; overflow: hidden; }
-.cp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 999px; }
-.cp-txt { font-size: 10px; color: #fff; white-space: nowrap; font-weight: 600; }
+/* 放送进度改由 SubjectCard 在封面内展示（底边细进度线 + 左下角话数徽章） */
 .cal-countdown {
   position: absolute; top: 6px; left: 6px; font-size: 10px; font-weight: 700;
   background: rgba(229,72,77,.92); color: #fff; padding: 3px 8px; border-radius: 999px;
