@@ -338,7 +338,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function setMemoryJob(userId, kind, queued) {
   importJobs.set(userId, {
-    kind, running: false, queued, done: 0, total: 0, expected: 0, currentType: 0,
+    kind, running: false, queued, done: 0, total: 0, expected: 0, currentType: 0, pruned: 0,
     error: '', startedAt: Date.now()
   });
 }
@@ -510,6 +510,31 @@ async function insertBgmItems(conn, userId, items, subjectType, token) {
   }
 }
 
+// Bangumi 侧删除了收藏时本地也要跟着删：否则「全部」Tab 计数、导出备份里会留下
+// Bangumi 上已经不存在的「幽灵条目」（表现为计数比列表多、导出比列表多）。
+// 只清理 sync_dirty=0 的行：本地改动还没推成功（dirty）的条目必须保留，等下次补推。
+async function pruneDeletedOnBgm(userId, seenIds) {
+  const [rows] = await pool.query(
+    'SELECT subject_id FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0',
+    [userId]
+  );
+  const stale = [];
+  for (const r of rows || []) {
+    const id = +r.subject_id;
+    if (!seenIds.has(id)) stale.push(id);
+  }
+  if (!stale.length) return 0;
+  for (let i = 0; i < stale.length; i += 200) {
+    const chunk = stale.slice(i, i + 200);
+    await pool.query(
+      `DELETE FROM collections WHERE user_id = ? AND COALESCE(sync_dirty, 0) = 0 AND subject_id IN (${chunk.map(() => "?").join(",")})`,
+      [userId, ...chunk]
+    );
+  }
+  console.log('[collections] pruned', stale.length, 'local collection(s) no longer on Bangumi for user', userId);
+  return stale.length;
+}
+
 // 导入/自动同步开始前，先把本地待重推(sync_dirty=1)的收藏补推给 Bangumi：
 // 单条失败不中断（保留 dirty，等下次同步再试）；成功后清 dirty，随后导入回写时
 // Bangumi 上已是用户的最新改动，本地不会被旧数据覆盖。
@@ -559,6 +584,8 @@ async function runBgmImport(userId, user) {
   }
   const bangumiUid = user.bangumi_uid;
   const types = [1, 2, 3, 4, 6];
+  const seenIds = new Set(); // 本次从 Bangumi 实际拉到的 subject_id（用于对齐删除）
+  let complete = true;       // 任何一页提前结束都置 false：结果不完整时不做删除，避免误删
   try {
     for (const subjectType of types) {
       job.currentType = subjectType;
@@ -569,20 +596,25 @@ async function runBgmImport(userId, user) {
         for (;;) {
           const data = await fetchBgmCollections(bangumiUid, token, { subjectType, limit: 50, offset });
           const items = data.data || [];
+          const pgTotal = data.total != null ? +data.total : null;
           if (first) { job.expected += (data.total || 0); first = false; }
           await insertBgmItems(conn, userId, items, subjectType, token);
+          for (const it of items) if (it && it.subject_id != null) seenIds.add(+it.subject_id);
           job.done += items.length;
           offset += items.length;
-          if (items.length >= 50 && (data.total == null || offset < data.total)) {
+          if (items.length >= 50 && (pgTotal == null || offset < pgTotal)) {
             await sleep(120); // 每页稍微间隔，避免打爆 Bangumi 限流
             continue;
           }
+          if (pgTotal != null && offset < pgTotal) complete = false; // 分页提前结束 → 本轮不作为删除依据
           break;
         }
       } finally {
         conn.release();
       }
     }
+    // Bangumi 是收藏「存在性」的权威源：BGM 侧取消收藏后，本地同步删除（见 pruneDeletedOnBgm）
+    job.pruned = complete ? await pruneDeletedOnBgm(userId, seenIds) : 0;
     job.total = job.done;
   } catch (e) {
     job.error = e.message || '导入失败';
@@ -601,7 +633,7 @@ router.post('/collections/import', async (req, res, next) => {
 // 导入进度查询（前端轮询：running=true 执行中；queued=true 排队中；两者皆 false 且无 error 即完成）
 router.get('/collections/import/status', (req, res) => {
   const job = importJobs.get(req.user.id);
-  const base = job || { running: false, queued: false, done: 0, total: 0, expected: 0, currentType: 0, error: '' };
+  const base = job || { running: false, queued: false, done: 0, total: 0, expected: 0, currentType: 0, pruned: 0, error: '' };
   res.json({ ...base, autoSync: getAutoSyncInfo() });
 });
 

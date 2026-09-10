@@ -89,7 +89,8 @@ const importDoneText = computed(() => {
   if (!j) return '';
   if (!j.running && j.queued) return '已进入同步队列，等待前面的任务完成后自动开始，请勿关闭页面…';
   const typeName = j.currentType ? ({ 1: '书籍', 2: '动画', 3: '音乐', 4: '游戏', 6: '三次元' }[j.currentType] || '条目') : '';
-  return `已导入 ${j.done} 条${typeName ? '（正在处理' + typeName + '…）' : ''}`;
+  const pruned = j.pruned ? `，已清理 ${j.pruned} 条 Bangumi 侧已取消的收藏` : '';
+  return `已导入 ${j.done} 条${typeName ? '（正在处理' + typeName + '…）' : ''}${pruned}`;
 });
 
 let loadSeq = 0;
@@ -285,8 +286,12 @@ watch(() => route.query.tag, (v) => {
         </n-tab-pane>
       </n-tabs>
 
-      <n-alert v-if="listSource === 'bangumi' && bgmTotal > (counts.total || 0)" type="info" :show-icon="false" style="margin:8px 0 2px">
+      <!-- Bangumi 实时列表与本地统计不一致时的两种方向提示（v-if / v-else-if 必须相邻，注释放前面） -->
+      <n-alert v-if="status === 0 && listSource === 'bangumi' && bgmTotal > (counts.total || 0)" type="info" :show-icon="false" style="margin:8px 0 2px">
         🌙 列表实时来自 Bangumi（共 {{ bgmTotal }} 条）· 收藏统计来自本地库（已导入 {{ counts.total || 0 }} 条）{{ autoSyncText ? '· 已开启自动同步，统计会自动补全' : '· 点右上角「导入 Bangumi 收藏」后统计即为完整' }}
+      </n-alert>
+      <n-alert v-else-if="status === 0 && listSource === 'bangumi' && (counts.total || 0) > bgmTotal" type="warning" :show-icon="false" style="margin:8px 0 2px">
+        ⚠️ Bangumi 上现有 {{ bgmTotal }} 条，本地统计多出 {{ (counts.total || 0) - bgmTotal }} 条（多半是已在 Bangumi 侧取消收藏的条目）· 点右上角「导入 Bangumi 收藏」{{ autoSyncText ? "或等自动同步" : "" }}即可对齐计数与导出
       </n-alert>
 
       <div class="toolbar">
