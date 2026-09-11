@@ -9,6 +9,44 @@ const router = useRouter();
 const message = useMessage();
 const userStore = useUserStore();
 
+// ---------- 注册用户（站长可见） ----------
+const userStats = ref(null);
+const userList = ref([]);
+const showEmail = ref(false);
+const usersLoading = ref(false);
+
+async function loadUsers() {
+  usersLoading.value = true;
+  try {
+    const d = await api.get('/admin/users');
+    userStats.value = (d && d.stats) || null;
+    userList.value = (d && d.users) || [];
+  } catch (e) {
+    message.error(e.message);
+  }
+  usersLoading.value = false;
+}
+
+// 绝对时间（后端已把 UTC 补成带 Z 的 ISO，浏览器按本地时区换算）
+function fmtDT(s) {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d)) return String(s);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+// 相对时间：今天 / 昨天 / n 天前 / n 个月前
+function agoText(s) {
+  if (!s) return '';
+  const t = new Date(s).getTime();
+  if (isNaN(t)) return '';
+  const days = Math.floor((Date.now() - t) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 30) return days + ' 天前';
+  return Math.floor(days / 30) + ' 个月前';
+}
+
 // ---------- 博客 ----------
 const posts = ref([]);
 const editing = ref(false);
@@ -133,7 +171,7 @@ async function removeComment(id) {
   } catch (e) { message.error(e.message); }
 }
 
-onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); loadComments(); } else router.replace('/'); });
+onMounted(() => { if (userStore.isOwner) { loadUsers(); load(); loadAnns(); loadComments(); } else router.replace('/'); });
 </script>
 
 <template>
@@ -143,6 +181,62 @@ onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); loadComments(); }
       <div class="actions">
         <n-button size="small" type="primary" @click="userStore.logout()">退出登录</n-button>
       </div>
+    </div>
+
+    <!-- 注册用户 -->
+    <div class="section-title">
+      <h3>👥 注册用户</h3>
+      <div class="actions">
+        <template v-if="userList.some(u => u.email)">
+          <span class="muted" style="font-size:12px;line-height:24px">完整邮箱</span>
+          <n-switch v-model:value="showEmail" size="small" />
+        </template>
+        <n-button size="tiny" :loading="usersLoading" @click="loadUsers">刷新</n-button>
+      </div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-cell"><b>{{ userStats ? userStats.total : '—' }}</b><span>注册总数</span></div>
+      <div class="stat-cell"><b>{{ userStats ? userStats.new_7d : '—' }}</b><span>近 7 天新增</span></div>
+      <div class="stat-cell"><b>{{ userStats ? userStats.new_30d : '—' }}</b><span>近 30 天新增</span></div>
+      <div class="stat-cell"><b>{{ userStats ? userStats.active_7d : '—' }}</b><span>近 7 天登录</span></div>
+      <div class="stat-cell"><b>{{ userStats ? userStats.bangumi_accounts : '—' }}</b><span>Bangumi 授权</span></div>
+      <div class="stat-cell"><b>{{ userStats ? userStats.local_accounts : '—' }}</b><span>账号密码注册</span></div>
+    </div>
+    <p v-if="userStats" class="section-hint muted">
+      已设邮箱 {{ userStats.with_email }} 个 · 已验证 {{ userStats.email_verified }} 个 · 当前有效只读访客会话 {{ userStats.viewer_sessions }} 个
+    </p>
+    <div class="user-table-wrap">
+      <table class="user-table">
+        <thead><tr><th>用户</th><th>来源</th><th>注册时间</th><th>上次登录</th><th>追番</th><th>会话</th></tr></thead>
+        <tbody>
+          <tr v-for="u in userList" :key="u.id">
+            <td>
+              <div class="u-cell">
+                <img v-if="u.avatar" class="u-avatar" :src="u.avatar" alt="" referrerpolicy="no-referrer" />
+                <span v-else class="u-avatar u-avatar-txt">{{ (u.nickname || '?').slice(0, 1) }}</span>
+                <div class="u-meta">
+                  <span class="u-name">{{ u.nickname }}<n-tag v-if="u.is_owner" size="tiny" type="warning" :bordered="false">站长</n-tag></span>
+                  <span class="u-sub">
+                    <template v-if="u.email">{{ showEmail ? u.email : u.email_masked }}</template>
+                    <template v-else-if="u.bangumi_uid">Bangumi UID {{ u.bangumi_uid }}</template>
+                    <template v-else>#{{ u.id }} · {{ u.username }}</template>
+                  </span>
+                </div>
+              </div>
+            </td>
+            <td>
+              <n-tag size="small" :bordered="false" :type="u.source === 'bangumi' ? 'info' : u.source === 'local' ? 'success' : 'default'">
+                {{ u.source === 'bangumi' ? 'Bangumi' : u.source === 'local' ? '账号密码' : '未知' }}
+              </n-tag>
+            </td>
+            <td>{{ fmtDT(u.created_at) }}</td>
+            <td>{{ fmtDT(u.last_login_at) }}<span v-if="agoText(u.last_login_at)" class="muted"> · {{ agoText(u.last_login_at) }}</span></td>
+            <td>{{ u.collections }}</td>
+            <td>{{ u.live_sessions }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-if="!userList.length" class="muted" style="padding:20px 0;text-align:center">暂无注册用户</div>
     </div>
 
     <!-- 全站公告 -->
@@ -262,6 +356,21 @@ onMounted(() => { if (userStore.isOwner) { load(); loadAnns(); loadComments(); }
 .comment-card .c-name { font-weight: 700; color: var(--accent); }
 .comment-card .c-post { font-size: 13px; color: var(--text-dim); }
 .comment-card .c-content { font-size: 14px; line-height: 1.7; color: var(--text); white-space: pre-wrap; margin-bottom: 8px; }
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.stat-cell { padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; gap: 4px; }
+.stat-cell b { font-size: 22px; line-height: 1.1; color: var(--accent); }
+.stat-cell span { font-size: 12px; color: var(--text-dim); }
+.user-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); }
+.user-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.user-table th { text-align: left; font-weight: 600; color: var(--text-dim); font-size: 12px; padding: 10px 12px; white-space: nowrap; border-bottom: 1px solid var(--border); }
+.user-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+.user-table tr:last-child td { border-bottom: none; }
+.u-cell { display: flex; align-items: center; gap: 10px; }
+.u-avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex: none; }
+.u-avatar-txt { display: inline-flex; align-items: center; justify-content: center; background: var(--accent-4); color: #fff; font-weight: 700; }
+.u-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.u-name { font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+.u-sub { font-size: 12px; color: var(--text-dim); }
 .edit-form .row { margin-bottom: 12px; }
 .edit-form label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 5px; }
 .publish-row { display: flex; align-items: center; justify-content: space-between; }

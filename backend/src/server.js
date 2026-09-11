@@ -70,6 +70,8 @@ app.use('/api/notify', require('./routes/notify'));
 app.use('/api/watch', require('./routes/watchupdates'));
 app.use('/api/blog', require('./routes/comments'));
 app.use('/api', require('./routes/extras'));
+// 站长专属站点总览（注册用户清单等）
+app.use('/api/admin', require('./routes/admin'));
 
 // 博客上传图片静态访问
 const uploadDir = path.join(__dirname, '..', 'uploads');
