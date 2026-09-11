@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
-import { NSpin, NTabs, NTabPane, NButton, NEmpty, NTag } from 'naive-ui';
+import { NSpin, NTabs, NTabPane, NButton, NEmpty, NTag, useMessage } from 'naive-ui';
 import { api, fmtDate, episodeLabel } from '../api';
 import SubjectCard from '../components/SubjectCard.vue';
 import { useUserStore } from '../stores/user';
@@ -15,6 +15,24 @@ const postsLoading = ref(true);
 const myUpdates = ref([]);
 const loadingMy = ref(false);
 const progressMap = ref({});
+const message = useMessage();
+const markingRead = ref(false);
+const myUnread = computed(() => myUpdates.value.reduce((a, x) => a + (+x.unread || 0), 0));
+
+// 手动「全部已读」：立即清掉列表里所有小圆点（只读访客无权限，按钮也不会显示）
+async function markAllRead() {
+  if (markingRead.value) return;
+  markingRead.value = true;
+  try {
+    await api.post('/watch/updates/read', {});
+    myUpdates.value = myUpdates.value.map(x => ({ ...x, unread: 0 }));
+    message.success('已全部标记为已读');
+  } catch (e) {
+    message.error(e.message || '操作失败');
+  } finally {
+    markingRead.value = false;
+  }
+}
 
 const WEEK = ['一', '二', '三', '四', '五', '六', '日'];
 const dayList = computed(() => calendar.value[activeDay.value - 1] || null);
@@ -106,6 +124,7 @@ onMounted(() => {
         <span class="mu-title">📣 我追的更了</span>
         <span class="mu-sub">近 30 天你收藏的番有新资源</span>
         <span class="spacer"></span>
+        <n-button v-if="!userStore.viewer && myUnread" size="small" type="primary" secondary :loading="markingRead" @click="markAllRead">全部已读</n-button>
         <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
       </div>
       <div class="mu-list">

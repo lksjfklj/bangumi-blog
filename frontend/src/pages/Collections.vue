@@ -182,8 +182,13 @@ async function loadUpdates() {
     const u = await api.get('/watch/my-updates?limit=5');
     myUpdates.value = (u && u.data) || [];
     if (!userStore.viewer) {
-      const un = await api.get('/watch/updates/unread?limit=1').catch(() => ({ unread: 0 }));
-      unreadCount.value = (un && un.unread) || 0;
+      try {
+        const un = await api.get('/watch/updates/unread?limit=1');
+        unreadCount.value = (un && un.unread) || 0;
+      } catch (e) {
+        // 未读接口异常时退回用列表里的未读合计，保证圆点和按钮对得上
+        unreadCount.value = myUpdates.value.reduce((a, x) => a + (+x.unread || 0), 0);
+      }
     } else {
       unreadCount.value = 0;
     }
@@ -210,7 +215,6 @@ async function markAllRead() {
   try {
     await api.post('/watch/updates/read', {});
     unreadCount.value = 0;
-    window.dispatchEvent(new Event('bb:updates-read'));
     message.success('已全部标记为已读');
     loadUpdates();
   } catch (e) { message.error(e.message); }
@@ -268,7 +272,7 @@ watch(() => route.query.tag, (v) => {
           <span class="upd-title">📣 你追的番有更新</span>
           <n-tag v-if="unreadCount" size="small" type="error" round :bordered="false">{{ unreadCount }} 条未读</n-tag>
           <span class="spacer"></span>
-          <n-button v-if="!userStore.viewer && unreadCount" text type="primary" size="small" @click="markAllRead">全部已读</n-button>
+          <n-button v-if="!userStore.viewer && unreadCount" size="small" type="primary" secondary @click="markAllRead">全部已读</n-button>
           <n-button text type="primary" size="small" @click="$router.push('/watch?my=1')">去新番更新 →</n-button>
         </div>
         <div class="upd-list">
