@@ -46,6 +46,30 @@ async function markOwner(row) {
   }
 }
 
+// 「已登录的本地账号点连接 Bangumi」的绑定意图：state -> { userId, ts }
+// 背景：sid 会话 Cookie 是 sameSite=strict，OAuth 回调是从 bgm.tv 跳回来的跨站导航，
+// 带不回会话（回调里 req.user 为空）。若只按 bangumi_uid 找账号，本地账号（邮箱/密码注册）
+// 授权回来后会被当成新用户建号，token 永远绑不到原账号上，两边的数据各存一份。
+// oauth_state 是 lax，回调时能带回来，所以用它把「发起连接的人是谁」带回来。
+const pendingBgmLinks = new Map();
+const BGM_LINK_TTL_MS = 10 * 60 * 1000;
+
+function rememberLinkIntent(state, userId) {
+  const now = Date.now();
+  for (const [k, v] of pendingBgmLinks) {
+    if (now - v.ts > BGM_LINK_TTL_MS) pendingBgmLinks.delete(k);
+  }
+  pendingBgmLinks.set(state, { userId, ts: now });
+}
+
+function takeLinkIntent(state) {
+  if (!state) return null;
+  const v = pendingBgmLinks.get(state);
+  if (!v) return null;
+  pendingBgmLinks.delete(state);
+  return Date.now() - v.ts > BGM_LINK_TTL_MS ? null : v;
+}
+
 // ---------- Bangumi OAuth ----------
 // 发起登录：跳转 bgm.tv OAuth
 router.get('/bangumi', (req, res) => {
@@ -53,6 +77,12 @@ router.get('/bangumi', (req, res) => {
     return res.status(503).json({ error: '尚未配置 Bangumi OAuth 应用（CLIENT_ID）' });
   }
   const state = crypto.randomBytes(8).toString('hex');
+  // 已登录、且还是「没绑过 Bangumi 的本地账号」时，记下绑定意图，
+  // 回调里把 token 绑到这个账号上，而不是另建一个账号
+  const cur = req.user;
+  if (cur && cur.kind !== 'viewer' && !cur.bangumi_uid && cur.password_hash) {
+    rememberLinkIntent(state, cur.id);
+  }
   res.cookie('oauth_state', state, { httpOnly: true, sameSite: 'lax', maxAge: 10 * 60 * 1000 });
   res.redirect(oauthAuthorizeUrl(state));
 });
@@ -66,6 +96,8 @@ router.get('/callback', async (req, res, next) => {
       return res.redirect('/login?login_error=state_mismatch');
     }
     if (!code) return res.status(400).json({ error: '缺少 code' });
+    // 这次授权是「已登录的本地账号点连接 Bangumi」发起的吗
+    const link = takeLinkIntent(state);
     const data = await oauthExchange(code);
     if (!data || !data.access_token) {
       return res.redirect('/login?login_error=token_failed');
@@ -85,11 +117,36 @@ router.get('/callback', async (req, res, next) => {
         [nickname, avatar, data.access_token, data.refresh_token || existing[0].refresh_token, expiresAt, isOwnerUser(existing[0]) ? 1 : 0, userId]
       );
     } else {
-      const [ins] = await pool.query(
-        'INSERT INTO users (bangumi_uid, username, nickname, avatar, access_token, refresh_token, token_expires_at, is_owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [uid, me.username || '', nickname, avatar, data.access_token, data.refresh_token || '', expiresAt, config.ownerBangumiUid === uid ? 1 : 0]
-      );
-      userId = ins.insertId;
+      // 本地账号绑 Bangumi：绑到发起连接的那个账号上，不新建账号。
+      // 登录名（username）保持不动，否则用户原来的账号密码就登不进来了；
+      // 昵称/头像只在原来是空的时候才补。
+      let linkedId = 0;
+      if (link) {
+        const [cur] = await pool.query(
+          'SELECT id FROM users WHERE id = ? AND (bangumi_uid IS NULL OR bangumi_uid = 0)',
+          [link.userId]
+        );
+        if (cur.length) {
+          linkedId = cur[0].id;
+          await pool.query(
+            `UPDATE users SET bangumi_uid = ?, access_token = ?, refresh_token = ?, token_expires_at = ?,
+               nickname = CASE WHEN COALESCE(nickname, '') = '' THEN ? ELSE nickname END,
+               avatar = CASE WHEN COALESCE(avatar, '') = '' THEN ? ELSE avatar END
+             WHERE id = ?`,
+            [uid, data.access_token, data.refresh_token || '', expiresAt, nickname, avatar, linkedId]
+          );
+          console.log('[auth] Bangumi 授权已绑定到本地账号 id=' + linkedId + '，uid=' + uid);
+        }
+      }
+      if (linkedId) {
+        userId = linkedId;
+      } else {
+        const [ins] = await pool.query(
+          'INSERT INTO users (bangumi_uid, username, nickname, avatar, access_token, refresh_token, token_expires_at, is_owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [uid, me.username || '', nickname, avatar, data.access_token, data.refresh_token || '', expiresAt, config.ownerBangumiUid === uid ? 1 : 0]
+        );
+        userId = ins.insertId;
+      }
     }
     const { token } = await createSession(userId, 'user');
     res.clearCookie('oauth_state');
