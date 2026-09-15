@@ -359,10 +359,10 @@ async function dbSyncRow(userId) {
   return rows[0] || null;
 }
 
-// 返回该用户剩余冷却毫秒数（0 表示可发起新同步）；计时基于持久化的最近一次同步时间
+// 返回该用户剩余冷却毫秒数（0 表示可发起新同步）；计时基于最近一次「入队」时间，与「上次同步成功时间」解耦
 async function cooldownRemainMs(userId) {
-  const [rows] = await pool.query('SELECT last_collection_sync_at FROM users WHERE id = ?', [userId]);
-  const last = +(rows[0] && rows[0].last_collection_sync_at) || 0;
+  const [rows] = await pool.query('SELECT MAX(enqueued_at) AS t FROM collection_sync_requests WHERE user_id = ?', [userId]);
+  const last = +(rows[0] && rows[0].t) || 0;
   const remain = last + config.bgmSyncCooldownMs - Date.now();
   return remain > 0 ? remain : 0;
 }
@@ -393,8 +393,8 @@ async function enqueueSyncCore(userId, kind) {
      ON CONFLICT(user_id) DO UPDATE SET kind = excluded.kind, status = 'queued', error = '', enqueued_at = excluded.enqueued_at, started_at = 0, finished_at = 0`,
     [userId, kind, now]
   );
-  // 入队即开始冷却计时（完成时会再刷新为完成时间），避免排队期间反复点击
-  await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [now, userId]);
+  // 冷却计时由 collection_sync_requests.enqueued_at 承担（见 cooldownRemainMs）：避免排队期间反复点击。
+  // users.last_collection_sync_at 只记录「最近一次成功同步」，失败时不写，界面才不会误报同步成功。
   // 覆盖旧的内存任务：即使上一次已完成（内存里残留 running=false/queued=false 的旧任务），
   // 也必须重置为 queued=true，否则队列 worker 会把它当无效任务跳过，导致同一次进程生命周期里
   // 第二次及以后的同步被静默丢弃（自动同步也会因此只生效一次）
@@ -468,14 +468,18 @@ function startQueueWorker() {
       } finally {
         job.running = false;
         const finishedAt = Date.now();
-        const status = job.error ? 'failed' : 'done';
+        const failed = !!job.error;
+        const status = failed ? 'failed' : 'done';
         try {
           await pool.query(
             `UPDATE collection_sync_requests SET status = ?, error = ?, finished_at = ? WHERE user_id = ?`,
             [status, String(job.error || '').slice(0, 500), finishedAt, userId]
           );
-          // 任务真正结束后刷新冷却计时（取完成时间，避免完成前立刻重发）
-          await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [finishedAt, userId]);
+          // 只有真正成功才记录「上次成功同步时间」：失败时若照写，界面会显示成刚刚同步成功，
+          // 把授权失效之类的问题掩盖掉（冷却计时另由 enqueued_at 负责）。
+          if (!failed) {
+            await pool.query('UPDATE users SET last_collection_sync_at = ? WHERE id = ?', [finishedAt, userId]);
+          }
         } catch (e) {
           console.error('[collections] persist job result failed for user', userId, ':', e.message);
         }

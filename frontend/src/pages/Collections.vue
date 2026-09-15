@@ -36,17 +36,35 @@ function fmtClock(ts) {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 // 「自动同步」一行摘要：默认每 12 小时，由服务端定时器拉取，不依赖本页面打开
+const autoSyncIntervalText = computed(() => {
+  const a = autoSync.value;
+  const ms = (a && a.intervalMs) || 12 * 3600 * 1000;
+  const hours = Math.round(ms / 3600000);
+  if (hours >= 48) return `约每 ${Math.round((hours / 24) * 10) / 10} 天`;
+  if (hours >= 1) return `约每 ${hours} 小时`;
+  return `约每 ${Math.max(1, Math.round(ms / 60000))} 分钟`;
+});
+
 const autoSyncText = computed(() => {
   const a = autoSync.value;
   if (!a || !a.enabled) return '';
-  if (a.running) return '🤖 自动同步正在运行，正在从 Bangumi 更新本地收藏…';
-  const hours = Math.round((a.intervalMs || 0) / 3600000);
-  const interval = hours >= 48 ? `约每 ${Math.round((hours / 24) * 10) / 10} 天` : (hours >= 1 ? `约每 ${hours} 小时` : `约每 ${Math.max(1, Math.round((a.intervalMs || 0) / 60000))} 分钟`);
-  const parts = [`🤖 自动同步已开启（${interval}自动从 Bangumi 更新本地收藏）`];
-  if (a.lastRunAt) parts.push(`上次 ${fmtClock(a.lastRunAt)}`);
+  if (a.running) return '🤖 自动同步正在运行：正在从 Bangumi 更新本地收藏…';
+  const parts = [`🤖 自动同步已开启：${autoSyncIntervalText.value}自动从 Bangumi 拉一次（服务端定时，不用开着这个页面）`];
+  if (a.lastRunAt) parts.push(`上次扫描 ${fmtClock(a.lastRunAt)}`);
   if (a.nextRunAt) parts.push(`下次 ${fmtClock(a.nextRunAt)}`);
   return parts.join(' · ');
 });
+
+// 上次「成功」同步时间：失败不写入（见后端 collections.js），所以显示的这行是可信的
+const lastSyncText = computed(() => {
+  const ts = +((userStore.user && userStore.user.last_sync_at) || 0);
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${d.getMonth() + 1} 月 ${d.getDate()} 日 ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+});
+
+// 重新走一次 Bangumi 授权：同一个 Bangumi 账号会覆盖掉旧的失效令牌，本地数据不受影响
+function reconnectBgm() { location.href = '/api/auth/bangumi'; }
 
 async function loadAutoSync() {
   try {
@@ -226,7 +244,7 @@ onMounted(() => {
     load();
     loadTags();
     loadUpdates();
-    if (userStore.user.connected && !userStore.viewer) loadAutoSync();
+    loadAutoSync(); // 未连接时也要拉一次状态：连接状态和同步说明都要显示出来
   }
 });
 onUnmounted(() => { if (importTimer) clearTimeout(importTimer); });
@@ -256,8 +274,9 @@ watch(() => route.query.tag, (v) => {
       </n-alert>
       <div class="head" v-reveal>
         <h2><span class="emoji">🌙</span>我的追番</h2>
-        <div class="actions" v-if="userStore.user.connected && !userStore.viewer">
-          <n-button size="small" :loading="importing" @click="importFromBgm">导入 Bangumi 收藏</n-button>
+        <div class="actions" v-if="!userStore.viewer">
+          <n-button v-if="userStore.user.connected" size="small" :loading="importing" @click="importFromBgm">导入 Bangumi 收藏</n-button>
+          <n-button v-else size="small" type="primary" ghost @click="reconnectBgm">重新连接 Bangumi</n-button>
           <n-dropdown trigger="hover" :options="exportOptions" @select="doExport">
             <n-button size="small" secondary>💾 导出本地备份</n-button>
           </n-dropdown>
@@ -265,7 +284,32 @@ watch(() => route.query.tag, (v) => {
       </div>
 
       <div class="auto-sync-line" v-if="autoSyncText">{{ autoSyncText }}</div>
-      <div class="auto-sync-line" v-if="userStore.user.connected && !userStore.viewer">💡 双向同步：在本站修改收藏/进度会立即写入 Bangumi；在 Bangumi 上的改动点「导入 Bangumi 收藏」或等待自动同步拉回本站。不再需要手动推送。</div>
+
+      <!-- Bangumi 连接状态：授权失效时也照常显示，否则按钮和说明会一起消失，用户根本不知道发生了什么 -->
+      <div v-if="!userStore.viewer" class="bgm-conn" :class="userStore.user.connected ? 'ok' : 'bad'">
+        <template v-if="userStore.user.connected">
+          ✅ 已连接 Bangumi（UID {{ userStore.user.bangumi_uid }}）{{ lastSyncText ? '· 上次成功同步：' + lastSyncText : '· 还没有成功同步过' }}
+        </template>
+        <template v-else-if="userStore.user.bangumi_uid">
+          ⚠️ Bangumi 授权已失效，同步已暂停：收藏和进度仍可正常修改，但只会保存在本站，不会写到 Bangumi。
+          <n-button text type="primary" size="tiny" @click="reconnectBgm">点此重新连接 Bangumi</n-button>
+        </template>
+        <template v-else>
+          ⚠️ 还没有连接 Bangumi 账号，收藏和进度只会保存在本站。
+          <n-button text type="primary" size="tiny" @click="reconnectBgm">点此连接 Bangumi</n-button>
+        </template>
+      </div>
+
+      <!-- 联动说明：连没连上 Bangumi 都要显示，否则用户看不到这两个功能的存在 -->
+      <div class="bgm-help">
+        <div class="bgm-help-hd">🔗 本站与 Bangumi 的联动规则</div>
+        <ul>
+          <li><b>本站 → Bangumi（实时）</b>：在本站改收藏状态、评分、标签、单集进度（含倒回、取消看过），都会立刻写到 Bangumi。</li>
+          <li><b>Bangumi → 本站（延迟）</b>：在 Bangumi 上的改动不会实时回传，需要点右上角「导入 Bangumi 收藏」拉一次，或等自动同步（{{ autoSyncIntervalText }}）跑一轮。</li>
+          <li><b>写失败不丢数据</b>：Bangumi 侧出错时改动先存在本站并标记待重推，下次同步自动补推，页面会提示「已保存在本站，Bangumi 同步失败，将自动重试」。</li>
+          <li><b>取消收藏</b>：本站不提供「取消收藏」，不想看了就把状态改成「抛弃」（与 Bangumi 一致）；在 Bangumi 侧删掉的收藏，本站会在下次同步时跟着删。</li>
+        </ul>
+      </div>
 
       <div v-if="!updatesLoading && myUpdates.length" class="updates-bar" v-reveal>
         <div class="upd-head">
@@ -346,6 +390,14 @@ watch(() => route.query.tag, (v) => {
 .head h2 { margin: 0; }
 .actions { display: flex; gap: 8px; }
 .auto-sync-line { font-size: 12px; color: var(--text-dim); margin: 0 0 6px; }
+.bgm-conn { font-size: 12.5px; line-height: 1.7; margin: 0 0 8px; padding: 7px 11px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim); }
+.bgm-conn.ok { border-color: rgba(90, 200, 140, .45); }
+.bgm-conn.bad { border-color: var(--accent-4); color: var(--text); }
+.bgm-help { margin: 0 0 10px; padding: 9px 12px 7px; border: 1px dashed var(--border); border-radius: 12px; background: var(--bg-card); }
+.bgm-help-hd { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.bgm-help ul { margin: 0; padding-left: 18px; }
+.bgm-help li { font-size: 12.5px; line-height: 1.75; color: var(--text-dim); }
+.bgm-help b { color: var(--text); }
 .toolbar { display: flex; align-items: center; gap: 12px; margin: 12px 0 2px; flex-wrap: wrap; }
 .tag-count { font-size: 13px; }
 .updates-bar { margin: 12px 0 2px; background: var(--bg-card); border: 1px solid var(--accent); border-radius: 14px; padding: 12px 14px 8px; }

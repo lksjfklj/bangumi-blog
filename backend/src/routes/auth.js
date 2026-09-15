@@ -308,6 +308,7 @@ router.get('/me', async (req, res) => {
     profile_public: +req.user.profile_public === 1,
     bio: req.user.bio || '',
     connected: !!token,
+    last_sync_at: +req.user.last_collection_sync_at || 0,
     is_owner: isOwner,
     role
   }, viewer });
