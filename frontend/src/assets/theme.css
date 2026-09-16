@@ -587,3 +587,10 @@ html[data-theme='scarlet'] .markdown-body pre code { color: var(--code-inline); 
 html[data-theme='scarlet'] .subject-card .cover .score { color: var(--score-text); }
 html[data-theme='scarlet'] .subject-card .cover .badge { background: var(--badge-bg); border-color: rgba(179,39,61,.4); }
 html[data-theme='scarlet'] .foot-line { color: var(--foot-accent); }
+
+/* ========== 手机端安全兜底 ========== */
+/* naive-ui 按钮默认 white-space: nowrap，长文案按钮在窄屏会把页面撑出横向滚动 */
+@media (max-width: 560px) {
+  .n-button { max-width: 100%; white-space: normal; }
+  .n-button .n-button__content { white-space: normal; overflow-wrap: anywhere; }
+}

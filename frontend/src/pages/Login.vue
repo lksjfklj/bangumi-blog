@@ -97,7 +97,18 @@ async function enterViewer() {
   viewerLoading.value = false;
 }
 
-function bgmLogin() { location.href = '/api/auth/bangumi'; }
+// 用原生 <a href> 跳转：手机端比 location.href 更可靠，也能长按复制链接。
+// 点击后 6 秒仍没跳走，说明多半是 bgm.tv 在当前网络下打不开，直接给出提示。
+const bgmGo = ref(false);
+const bgmStuck = ref(false);
+let bgmTimer = null;
+function bgmStart() {
+  bgmStuck.value = false;
+  bgmGo.value = true;
+  if (bgmTimer) clearTimeout(bgmTimer);
+  bgmTimer = setTimeout(() => { bgmStuck.value = true; }, 6000);
+}
+onUnmounted(() => { if (bgmTimer) clearTimeout(bgmTimer); });
 </script>
 
 <template>
@@ -159,9 +170,15 @@ function bgmLogin() { location.href = '/api/auth/bangumi'; }
 
       <div class="divider"><span>或使用 Bangumi 账号</span></div>
 
-      <n-button secondary round block size="large" @click="bgmLogin">
-        <span class="bgm-badge">B</span> 通过 Bangumi 账号登录（收藏可联动同步）
-      </n-button>
+      <a class="bgm-btn" :class="{ busy: bgmGo }" href="/api/auth/bangumi" @click="bgmStart">
+        <span class="bgm-badge">B</span>
+        <span class="bgm-btn-txt">{{ bgmGo ? '正在跳转到 Bangumi 授权页…' : '通过 Bangumi 账号登录（收藏可联动同步）' }}</span>
+      </a>
+      <p v-if="bgmStuck" class="bgm-warn">
+        页面好像没能跳转：Bangumi 官网 bgm.tv 在国内部分网络（尤其是手机流量）无法直接打开。
+        请开启代理后重试；或先在开着代理的电脑上用 Bangumi 登录、到「追番」页完成连接，
+        之后手机直接用本站账号密码登录即可，同步由服务器完成。
+      </p>
       <p class="foot-note">本地账号的数据（追番、评分、评论、标签）保存在本站服务器；Bangumi 账号则与你的 Bangumi 双向同步。</p>
     </div>
   </div>
@@ -213,6 +230,40 @@ function bgmLogin() { location.href = '/api/auth/bangumi'; }
   font-weight: 900; font-size: 13px; margin-right: 8px;
 }
 .foot-note { margin: 14px 0 0; font-size: 11.5px; color: var(--text-dim); line-height: 1.6; text-align: center; }
+
+/* Bangumi 登录改用原生 <a>：手机端更可靠，长文案也能换行 */
+.bgm-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; box-sizing: border-box; min-width: 0;
+  padding: 11px 14px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-soft);
+  color: var(--text); font-size: 14px; font-weight: 600; line-height: 1.45;
+  text-decoration: none; text-align: center;
+  transition: border-color .18s, color .18s;
+}
+.bgm-btn:hover { border-color: var(--accent); color: var(--accent); }
+.bgm-btn.busy { opacity: .7; pointer-events: none; }
+.bgm-btn-txt { min-width: 0; overflow-wrap: anywhere; }
+.bgm-warn {
+  margin: 12px 0 0; padding: 10px 12px; border-radius: 12px;
+  border: 1px dashed var(--viewer-border); background: var(--viewer-bg);
+  color: var(--text-dim); font-size: 12px; line-height: 1.7;
+}
+
+/* 手机端：收紧留白并允许长文案换行，避免横向溢出 */
+@media (max-width: 560px) {
+  .login-wrap { padding: 22px 12px 46px; }
+  .login-card { padding: 22px 16px 20px; border-radius: 18px; }
+  .card-head { margin-bottom: 18px; }
+  .card-head .emoji { font-size: 28px; }
+  .card-head h1 { font-size: 21px; letter-spacing: 2px; }
+  .card-head h1::after { margin-left: 5px; font-size: 13px; vertical-align: 4px; }
+  .mail-row { flex-direction: column; align-items: stretch; gap: 8px; }
+  .mail-row :deep(.n-button) { width: 100%; }
+  .switch-hint { flex-direction: column; align-items: flex-start; }
+  .switch-hint .switch-logout { margin-left: 0; }
+  .bgm-btn { font-size: 13px; padding: 10px 12px; }
+}
 .mail-row { display: flex; gap: 8px; align-items: center; width: 100%; }
 .mail-row :deep(.n-input) { flex: 1 1 auto; }
 </style>

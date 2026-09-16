@@ -64,7 +64,7 @@ const lastSyncText = computed(() => {
 });
 
 // 重新走一次 Bangumi 授权：同一个 Bangumi 账号会覆盖掉旧的失效令牌，本地数据不受影响
-function reconnectBgm() { location.href = '/api/auth/bangumi'; }
+
 
 async function loadAutoSync() {
   try {
@@ -276,7 +276,7 @@ watch(() => route.query.tag, (v) => {
         <h2><span class="emoji">🌙</span>我的追番</h2>
         <div class="actions" v-if="!userStore.viewer">
           <n-button v-if="userStore.user.connected" size="small" :loading="importing" @click="importFromBgm">导入 Bangumi 收藏</n-button>
-          <n-button v-else size="small" type="primary" ghost @click="reconnectBgm">重新连接 Bangumi</n-button>
+          <n-button v-else size="small" type="primary" ghost tag="a" href="/api/auth/bangumi">重新连接 Bangumi</n-button>
           <n-dropdown trigger="hover" :options="exportOptions" @select="doExport">
             <n-button size="small" secondary>💾 导出本地备份</n-button>
           </n-dropdown>
@@ -292,17 +292,18 @@ watch(() => route.query.tag, (v) => {
         </template>
         <template v-else-if="userStore.user.bangumi_uid">
           ⚠️ Bangumi 授权已失效，同步已暂停：收藏和进度仍可正常修改，但只会保存在本站，不会写到 Bangumi。
-          <n-button text type="primary" size="tiny" @click="reconnectBgm">点此重新连接 Bangumi</n-button>
+          <n-button text type="primary" size="tiny" tag="a" href="/api/auth/bangumi">点此重新连接 Bangumi</n-button>
         </template>
         <template v-else>
           ⚠️ 还没有连接 Bangumi 账号，收藏和进度只会保存在本站。
-          <n-button text type="primary" size="tiny" @click="reconnectBgm">点此连接 Bangumi</n-button>
+          <n-button text type="primary" size="tiny" tag="a" href="/api/auth/bangumi">点此连接 Bangumi</n-button>
         </template>
       </div>
 
       <!-- 联动说明：连没连上 Bangumi 都要显示，否则用户看不到这两个功能的存在 -->
       <div class="bgm-help">
         <div class="bgm-help-hd">🔗 本站与 Bangumi 的联动规则</div>
+        <p class="bgm-net">⚠️ 点「连接 Bangumi」会跳到 bgm.tv 授权。该域名在国内部分网络（尤其手机流量）打不开，点了没反应时请先开代理。</p>
         <ul>
           <li><b>本站 → Bangumi（实时）</b>：在本站改收藏状态、评分、标签、单集进度（含倒回、取消看过），都会立刻写到 Bangumi。</li>
           <li><b>Bangumi → 本站（延迟）</b>：在 Bangumi 上的改动不会实时回传，需要点右上角「导入 Bangumi 收藏」拉一次，或等自动同步（{{ autoSyncIntervalText }}）跑一轮。</li>
@@ -414,6 +415,13 @@ watch(() => route.query.tag, (v) => {
 .import-box { padding: 4px 2px; }
 .import-tip { margin: 0 0 14px; line-height: 1.6; }
 .import-done { margin: 12px 0 0; }
+.bgm-net { margin: 0 0 7px; font-size: 12px; line-height: 1.7; color: var(--text-dim); }
+/* 手机端：按钮文案较长时允许换行，避免撑破屏幕 */
+@media (max-width: 560px) {
+  .toolbar { gap: 8px; }
+  .toolbar :deep(.n-button) { max-width: 100%; white-space: normal; }
+  .bgm-conn { line-height: 1.8; }
+}
 </style>
 
 
