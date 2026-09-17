@@ -30,7 +30,7 @@ async function rawRequest(url, { method = 'GET', headers = {}, body, token } = {
       ...headers
     },
     body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
-    dispatcher,
+    ...(dispatcher ? { dispatcher } : {}),
     signal: AbortSignal.timeout(20000)
   });
   if (!res.ok) {

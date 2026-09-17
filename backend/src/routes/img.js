@@ -30,7 +30,7 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const upstream = await fetch(url.href, { dispatcher, signal: AbortSignal.timeout(15000) });
+    const upstream = await fetch(url.href, { ...(dispatcher ? { dispatcher } : {}), signal: AbortSignal.timeout(15000) });
     if (!upstream.ok) return res.status(502).send('upstream ' + upstream.status);
     const buf = Buffer.from(await upstream.arrayBuffer());
     fs.writeFile(file, buf, () => {});
