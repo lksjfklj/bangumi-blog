@@ -64,4 +64,10 @@ function requireAdmin(req, res, next) {
   return requireOwner(req, res, next);
 }
 
-module.exports = { createSession, deleteSession, cleanupExpiredSessions, getUserBySession, requireAuth, requireAdmin, requireOwner, requireNotViewer, randomToken };
+// 是否"站长本人"：必须是真实登录会话。只读访客会话（kind='viewer'）不算——
+// 那种会话任何人都能自助领取（只是按站长视角只读浏览），不能拿它当身份凭据。
+function isOwnerUser(user) {
+  return !!(user && user.kind !== 'viewer' && +user.is_owner === 1);
+}
+
+module.exports = { createSession, deleteSession, cleanupExpiredSessions, getUserBySession, requireAuth, requireAdmin, requireOwner, requireNotViewer, randomToken, isOwnerUser };

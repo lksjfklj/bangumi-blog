@@ -2,7 +2,7 @@
 // routes/comments.js - 博客评论：公开发表（需审核）+ 站长审核管理
 const express = require('express');
 const { pool } = require('../db');
-const { requireOwner } = require('../auth');
+const { requireOwner, isOwnerUser } = require('../auth');
 const { clientIpOf } = require('../security');
 const { parseId, cleanName } = require('../query');
 const router = express.Router();
@@ -37,13 +37,17 @@ function treeOf(rows) {
 // GET /api/blog/posts/:slug/comments
 router.get('/posts/:slug/comments', async (req, res, next) => {
   try {
-    const [posts] = await pool.query('SELECT id FROM posts WHERE slug = ?', [String(req.params.slug).slice(0, 200)]);
+    const [posts] = await pool.query('SELECT id, published FROM posts WHERE slug = ?', [String(req.params.slug).slice(0, 200)]);
     if (!posts.length) return res.status(404).json({ error: '文章不存在' });
+    const isDraft = +posts[0].published !== 1;
+    // 草稿的评论也只给站长看：否则这个接口就成了"某个 slug 到底存不存在"的探测口
+    if (isDraft && !isOwnerUser(req.user)) return res.status(404).json({ error: '文章不存在' });
     const [rows] = await pool.query(
       "SELECT id, parent_id, name, content, created_at FROM comments WHERE post_id = ? AND status = 'approved' ORDER BY id ASC",
       [posts[0].id]
     );
-    res.set('Cache-Control', 'public, max-age=120, s-maxage=120');
+    // 草稿的评论按登录态返回，绝不能进共享缓存（否则可能被缓存后回给匿名访客）
+    res.set('Cache-Control', isDraft ? 'no-store' : 'public, max-age=120, s-maxage=120');
     res.json({ data: treeOf(rows) });
   } catch (e) { next(e); }
 });

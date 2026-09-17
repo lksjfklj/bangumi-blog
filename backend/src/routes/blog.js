@@ -3,7 +3,7 @@ const express = require('express');
 const md = require('markdown-it')({ html: true, linkify: true, breaks: false });
 const { sanitizeHtmlSafe } = require('../sanitize');
 const { pool } = require('../db');
-const { requireAdmin } = require('../auth');
+const { requireAdmin, isOwnerUser } = require('../auth');
 const { strParam, paging, escapeLike, LIKE_ESC } = require('../query');
 const router = express.Router();
 
@@ -45,7 +45,14 @@ router.get('/posts/:slug', async (req, res, next) => {
        FROM posts p WHERE p.slug = ?`, [req.params.slug]);
     if (!rows.length) return res.status(404).json({ error: '文章不存在' });
     const post = rows[0];
-    // 按用户要求：草稿也可直接通过 slug 预览（已移除管理令牌限制）
+    // 未发布草稿只有站长本人（真实登录会话）能读：旧写法是"任何人在地址栏输入 slug 就能看到全文"，
+    // 半成品、写给自己看的草稿会被路人 / 爬虫顺手读走甚至收录进搜索引擎。
+    // 管理页的编辑与预览走同一个接口 + 登录 Cookie，站长自己的流程不受影响；只读访客会话不算本人。
+    if (+post.published !== 1) {
+      if (!isOwnerUser(req.user)) return res.status(404).json({ error: '文章不存在' }); // 与真不存在同响应，避免拿它探测 slug
+      res.set('Cache-Control', 'no-store');
+      res.set('X-Robots-Tag', 'noindex, nofollow');
+    }
     post.html = sanitizeHtmlSafe(md.render(post.content || ''));
     post.tags = post.tags ? post.tags.split(',') : [];
     res.json(post);

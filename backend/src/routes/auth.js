@@ -5,7 +5,7 @@ const config = require('../config');
 const { pool } = require('../db');
 const { oauthAuthorizeUrl, oauthExchange, bgm, getValidToken } = require('../bangumi');
 const { createSession, deleteSession, getUserBySession } = require('../auth');
-const { clientIpOf } = require('../security');
+const { clientIpOf, pruneBuckets } = require('../security');
 const router = express.Router();
 
 // ---------- 密码哈希（scrypt，随机盐） ----------
@@ -169,7 +169,9 @@ function checkRate(req, kind, limit, windowMs) {
   if (mine.length >= limit) return false;
   arr.push({ t: now, kind });
   rateBuckets.set(ip, arr);
-  if (rateBuckets.size > 10000) rateBuckets.clear(); // 防内存无限增长
+  // 防内存无限增长：只淘汰最久没活动的桶。旧写法 rateBuckets.clear() 会在刷满 10000 个 IP 时
+  // 把所有人的尝试次数一起清零，登录/验证码限流当场失效（爆破者只要顺手刷满阈值）
+  if (rateBuckets.size > 10000) pruneBuckets(rateBuckets, 10000);
   return true;
 }
 

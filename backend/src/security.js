@@ -12,11 +12,25 @@ function originOf(req) {
 function isLocalDev(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
 }
-// 客户端真实 IP：X-Forwarded-For 取最右一段（nginx 已把 XFF 覆盖为 $remote_addr 时只有一段），
-// 避免客户端伪造 XFF 绕过按 IP 的限流/风控；缺失时回退到 socket 对端地址。
+// IPv4-mapped IPv6（::ffff:1.2.3.4）统一成 IPv4，避免同一个 IP 出现两种写法
+function normIp(ip) {
+  const s = String(ip == null ? '' : ip).trim();
+  const m = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(s);
+  return m ? m[1] : s;
+}
+// 可信反代来源：只有"本机反代转发过来的连接"才认 X-Forwarded-For。
+// 直连后端端口时（socket 就是客户端地址）XFF 完全不可信：否则攻击者一枚请求换一个 XFF，
+// 就能刷出无数个"不同 IP"，把按 IP 的登录爆破限流、验证码限流、只读访客限量全部绕过去。
+// 生产是 nginx 与后端同机、proxy_pass 127.0.0.1，所以默认只信本机；反代在别的机器上用
+// TRUST_PROXY_IPS 显式声明。注意 XFF 取最右一段（nginx 用 $remote_addr 覆盖时只有一段）。
+const TRUSTED_PROXY_IPS = new Set([...(config.trustProxyIps || []), '::ffff:127.0.0.1']);
 function clientIpOf(req) {
-  const fwd = (req.headers['x-forwarded-for'] || '').split(',').pop().trim();
-  return fwd || (req.socket && req.socket.remoteAddress) || 'unknown';
+  const sock = normIp(req.socket && req.socket.remoteAddress);
+  if (sock && TRUSTED_PROXY_IPS.has(sock)) {
+    const fwd = normIp(String(req.headers['x-forwarded-for'] || '').split(',').pop());
+    if (fwd) return fwd;
+  }
+  return sock || 'unknown';
 }
 
 function isSameOrigin(req) {
@@ -64,6 +78,25 @@ function originGuard(req, res, next) {
   return res.status(403).json({ error: '跨站请求已拒绝', status: 403 });
 }
 
+// 计数桶超量时的清理：只淘汰"最久没活动"的那批，绝不整体 clear()。
+// 旧写法 buckets.clear() 会把所有人的计数一起清零——攻击者只要刷出 20000 个不同 IP
+// （伪造 XFF 或真实肉鸡都行），就能顺手把自己的限流记录也抹掉，等于给爆破开了后门。
+function pruneBuckets(map, maxSize) {
+  const now = Date.now();
+  for (const [k, arr] of map) {
+    // 空桶 / 全部过期的桶直接删掉，顺手回收内存
+    if (!Array.isArray(arr) || !arr.length) { map.delete(k); continue; }
+    const last = arr[arr.length - 1];
+    if (!last || now - last.t > 24 * 3600 * 1000) map.delete(k);
+  }
+  if (map.size <= maxSize) return;
+  const target = Math.max(1, Math.floor(maxSize * 0.9));
+  const idle = [];
+  for (const [k, arr] of map) idle.push([k, arr[arr.length - 1].t]);
+  idle.sort((a, b) => a[1] - b[1]);
+  for (let i = 0; i < idle.length && map.size > target; i++) map.delete(idle[i][0]);
+}
+
 // 简易内存限流（按 IP + 规则名），用于登录/写接口等敏感路径
 const buckets = new Map();
 function rateLimit({ windowMs = 60 * 1000, max = 120, name = 'api' } = {}) {
@@ -72,14 +105,15 @@ function rateLimit({ windowMs = 60 * 1000, max = 120, name = 'api' } = {}) {
     const now = Date.now();
     const arr = (buckets.get(ip) || []).filter(x => now - x.t < windowMs);
     if (arr.filter(x => x.k === name).length >= max) {
+      if (arr.length) buckets.set(ip, arr);
       res.setHeader('Retry-After', Math.ceil(windowMs / 1000));
       return res.status(429).json({ error: '请求过于频繁，请稍后再试', status: 429 });
     }
     arr.push({ t: now, k: name });
     buckets.set(ip, arr);
-    if (buckets.size > 20000) buckets.clear(); // 防内存无限增长
+    if (buckets.size > 20000) pruneBuckets(buckets, 20000); // 防内存无限增长
     next();
   };
 }
 
-module.exports = { securityHeaders, originGuard, rateLimit, isSameOrigin, originOf, clientIpOf };
+module.exports = { securityHeaders, originGuard, rateLimit, isSameOrigin, originOf, clientIpOf, pruneBuckets };

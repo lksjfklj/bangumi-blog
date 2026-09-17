@@ -147,6 +147,7 @@ cd backend && pnpm test
 | `BANGUMI_CLIENT_ID` / `BANGUMI_CLIENT_SECRET` / `BANGUMI_REDIRECT_URI` | Bangumi OAuth 应用凭证（登录 / 收藏同步用） |
 | `OWNER_BANGUMI_UID` | 站长 Bangumi UID（拥有博客管理 / 后台权限） |
 | `ADMIN_TOKEN` | 管理员令牌（后台接口鉴权） |
+| `TRUST_PROXY_IPS` | 可信反代来源 IP，逗号分隔（默认 `127.0.0.1,::1`）。只有来自这些地址的连接才采信 `X-Forwarded-For`；nginx 与后端不同机时必须填反代地址，否则限流会按反代 IP 计数 |
 | `BANGUMI_PROXY` / `WATCH_PROXY` | 出口代理，例如 `http://127.0.0.1:7890`（mihomo/clash） |
 | `NOTIFY_SERVERCHAN_KEY` | Server酱 SendKey（RSS 失败告警） |
 | `NOTIFY_TELEGRAM_BOT_TOKEN` / `NOTIFY_TELEGRAM_CHAT_ID` | Telegram 告警 |

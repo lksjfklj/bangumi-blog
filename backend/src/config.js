@@ -66,6 +66,11 @@ module.exports = {
   adminToken: env.ADMIN_TOKEN || '',
   // 站长账号：此 Bangumi UID 对应的用户拥有写权限（博客管理/只读访客模式基准）
   ownerBangumiUid: env.OWNER_BANGUMI_UID ? +env.OWNER_BANGUMI_UID : 0,
+  // 可信反代来源 IP（逗号分隔）：只有来自这些地址的连接才采信 X-Forwarded-For 里的客户端 IP。
+  // 默认只有本机——生产是 nginx 与后端同机、proxy_pass http://127.0.0.1:8088，
+  // 若反代在别的机器/容器里（例如单独一台 nginx），必须用 TRUST_PROXY_IPS 填上它的地址，
+  // 否则后端会把所有请求都算成反代这一个 IP，限流会互相牵连。
+  trustProxyIps: (env.TRUST_PROXY_IPS || '127.0.0.1,::1').split(',').map(s => s.trim()).filter(Boolean),
   sessionTtlMs: 30 * 24 * 3600 * 1000,
   publicBase: env.PUBLIC_BASE || 'http://8.134.187.77:8088',
   imgCacheDir: env.IMG_CACHE_DIR || path.join(__dirname, '..', 'img-cache'),
