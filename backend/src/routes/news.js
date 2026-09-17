@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { fetch, ProxyAgent } = require('undici');
 const { pool } = require('../db');
 const { strParam, paging, escapeLike, LIKE_ESC } = require('../query');
+const { safeFetch } = require('../safefetch');
 const { shrinkCover } = require('../imgutil');
 const { requireOwner } = require('../auth');
 const router = express.Router();
@@ -16,9 +17,18 @@ let dispatcher = null;
 if (config.bangumi.proxy) dispatcher = new ProxyAgent(config.bangumi.proxy);
 
 // fetch 封装：未配置代理时不传 dispatcher（undici 不允许 null dispatcher）
+function viaOpts(opts = {}, direct) {
+  const o = { ...opts };
+  if (!direct && dispatcher) o.dispatcher = dispatcher;
+  return o;
+}
 async function fetchVia(url, opts = {}, direct) {
-  if (!direct && dispatcher) opts.dispatcher = dispatcher;
-  return fetch(url, opts);
+  return fetch(url, viaOpts(opts, direct));
+}
+// 同上，但走 safefetch：RSS 内容（文章链接、og:image、正文 <img>）不受信，
+// 一旦被塞进 http://127.0.0.1:6379/... 这类地址，裸 fetch 会替攻击者打内网
+async function safeFetchVia(url, opts = {}, direct) {
+  return safeFetch(url, viaOpts(opts, direct));
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
@@ -214,7 +224,7 @@ async function localizeCover(url, direct) {
     const file = path.join(newsImgDir, key + ext);
     if (fs.existsSync(file) && fs.statSync(file).size > 0) return '/api/newsimg/' + key + ext;
     fs.mkdirSync(newsImgDir, { recursive: true });
-    const res = await fetchVia(url, { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': UA } }, direct);
+    const res = await safeFetchVia(url, { signal: AbortSignal.timeout(12000), headers: { 'User-Agent': UA } }, direct);
     if (!res.ok) return url;
     let buf = Buffer.from(await res.arrayBuffer());
     if (!buf.length) return url;
@@ -249,7 +259,8 @@ async function fetchApiCovers(src) {
 
 async function fetchOgImage(url, direct) {
   try {
-    const res = await fetchVia(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000), redirect: 'follow' }, direct);
+    // 不传 redirect: 'follow' —— safeFetch 内部按 manual 逐跳校验
+    const res = await safeFetchVia(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000) }, direct);
     if (!res.ok) return '';
     const html = await res.text();
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)

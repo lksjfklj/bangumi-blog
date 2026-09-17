@@ -5,6 +5,7 @@
 //   NOTIFY_TELEGRAM_CHAT_ID=xxx                  # 接收消息的 chat_id（支持 -100 群组）
 //   NOTIFY_WEBHOOK=https://example.com/hook      # 通用 Webhook，POST JSON {title, body}
 const config = require('./config');
+const { safeFetch } = require('./safefetch');
 
 function enabled() {
   return !!(config.notify && (
@@ -53,7 +54,8 @@ async function notify(title, body = '') {
     }
     if (c.webhook) {
       try {
-        const res = await fetch(c.webhook, {
+        // safeFetch：逐跳校验重定向，避免站长 webhook 被 302 引到内网
+        const res = await safeFetch(c.webhook, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
