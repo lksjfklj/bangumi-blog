@@ -13,6 +13,7 @@
 const { bgm, getValidToken } = require('./bangumi');
 const vndb = require('./vndb');
 const { pool } = require('./db');
+const { strParam, clampInt, escapeLike, LIKE_ESC, MAX_PAGE } = require('./query');
 
 // 允许地区（中，含香港台湾；日；韩）
 const ALLOWED_REGIONS = ['日本', '中国', '韩国', '台湾', '香港'];
@@ -665,17 +666,21 @@ async function syncStatus() {
 
 // 本地库分页查询（category: manga / lightnovel / galgame）
 async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', keyword = '', tag = '', year = '', region = '' }) {
+  // 分页参数在这里统一夹成整数：调用方会把 req.query.page 原样传进来，
+  // page=1.5 会算出小数 OFFSET，SQLite 直接抛 datatype mismatch（500）
+  const lim = clampInt(limit, 24, 1, 100);
+  const pg = clampInt(page, 1, 1, MAX_PAGE);
   const where = [CATEGORY_SQL[category], 'blocked = 0'];
   const params = [];
-  const kw = String(keyword).trim();
+  const kw = strParam(keyword).trim();
   if (kw) {
-    where.push('(name LIKE ? OR name_cn LIKE ?)');
-    const like = `%${kw}%`;
+    where.push('(name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ')');
+    const like = '%' + escapeLike(kw) + '%';
     params.push(like, like);
   }
   if (tag) {
-    where.push('tags LIKE ?');
-    params.push(`%"${tag}"%`);
+    where.push('tags LIKE ? ' + LIKE_ESC);
+    params.push('%' + escapeLike('"' + tag + '"') + '%');
   }
   if (/^\d{4}$/.test(year)) {
     where.push("substr(air_date, 1, 4) = ?");
@@ -685,16 +690,16 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
     if (region === '未标注') {
       where.push("regions = '[]'");
     } else {
-      where.push('regions LIKE ?');
-      params.push(`%"${region}"%`);
+      where.push('regions LIKE ? ' + LIKE_ESC);
+      params.push('%' + escapeLike('"' + region + '"') + '%');
     }
   }
   const whereSql = where.join(' AND ');
   const [totalRows] = await pool.query(`SELECT COUNT(*) AS n FROM library_subjects WHERE ${whereSql}`, params);
   const total = totalRows[0].n;
-  const lastPage = Math.max(1, Math.ceil(total / limit));
-  const safePage = Math.min(Math.max(page, 1), lastPage);
-  const offset = (safePage - 1) * limit;
+  const lastPage = Math.max(1, Math.ceil(total / lim));
+  const safePage = Math.min(pg, lastPage);
+  const offset = (safePage - 1) * lim;
   const order = sort === 'title' ? 'ORDER BY name_cn ASC, name ASC'
     : sort === 'rating' ? 'ORDER BY rating_score DESC, rating_total DESC'
     : sort === 'trends'
@@ -704,7 +709,7 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
     `SELECT subject_id AS id, category, name, name_cn, image, air_date,
             rating_score, rating_total, rank, platform, tags, regions
      FROM library_subjects WHERE ${whereSql} ${order} LIMIT ? OFFSET ?`,
-    [...params, limit, offset]
+    [...params, lim, offset]
   );
   const list = rows.map(r => {
     let tags = [], regions = [];
@@ -727,7 +732,7 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
       regions
     };
   });
-  return { data: list, total, page: safePage, limit, totalPages: lastPage, source: 'local' };
+  return { data: list, total, page: safePage, limit: lim, totalPages: lastPage, source: 'local' };
 }
 
 // 启动定时：进程启动后延时 5s 同步一次（不阻塞启动），之后每 12 小时一次

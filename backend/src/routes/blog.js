@@ -4,20 +4,27 @@ const md = require('markdown-it')({ html: true, linkify: true, breaks: false });
 const { sanitizeHtmlSafe } = require('../sanitize');
 const { pool } = require('../db');
 const { requireAdmin } = require('../auth');
+const { strParam, paging, escapeLike, LIKE_ESC } = require('../query');
 const router = express.Router();
 
 // 文章列表（公开：仅已发布）
 router.get('/posts', async (req, res, next) => {
   try {
-    const { tag, q, page = 1, size = 10 } = req.query;
-    const limit = Math.min(+size || 10, 50);
-    const offset = (Math.max(+page || 1, 1) - 1) * limit;
+    // 参数全部经 query.js 归一化：size/page 可能是数组或 NaN，tag 可能是 ?tag[]=a 数组
+    const tag = strParam(req.query.tag).trim();
+    const q = strParam(req.query.q).trim();
+    const { page, limit, offset } = paging(req.query, { defSize: 10, maxSize: 50 });
     let sql = `SELECT p.id, p.slug, p.title, p.summary, p.published, p.created_at, p.updated_at,
                (SELECT GROUP_CONCAT(t.name) FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id) AS tags
                FROM posts p WHERE p.published = 1`;
     const args = [];
     if (tag) { sql += ' AND p.id IN (SELECT post_id FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE t.name = ?)'; args.push(tag); }
-    if (q) { sql += ' AND (p.title LIKE ? OR p.summary LIKE ? OR p.content LIKE ?)'; const like = '%' + q + '%'; args.push(like, like, like); }
+    if (q) {
+      // 转义 LIKE 通配符，避免用户输入的 % / _ 被当成模式
+      sql += ' AND (p.title LIKE ? ' + LIKE_ESC + ' OR p.summary LIKE ? ' + LIKE_ESC + ' OR p.content LIKE ? ' + LIKE_ESC + ')';
+      const like = '%' + escapeLike(q) + '%';
+      args.push(like, like, like);
+    }
     sql += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
     args.push(limit, offset);
     const [rows] = await pool.query(sql, args);
@@ -26,7 +33,7 @@ router.get('/posts', async (req, res, next) => {
       tag ? [tag] : []
     );
     const list = rows.map(r => ({ ...r, tags: r.tags ? r.tags.split(',') : [] }));
-    res.json({ data: list, total: cnt[0].total, page: +page, size: limit });
+    res.json({ data: list, total: cnt[0].total, page, size: limit });
   } catch (e) { next(e); }
 });
 

@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const { fetch, ProxyAgent } = require('undici');
 const { pool } = require('../db');
 const config = require('../config');
+const { clampInt, paging } = require('../query');
 const { requireOwner } = require('../auth');
 const { bgm, cached } = require('../bangumi');
 const { shrinkCover } = require('../imgutil');
@@ -603,9 +604,13 @@ function buildFilter(req, user) {
   if (kw) { where += ' AND (title LIKE ? OR series_title LIKE ?)'; args.push('%' + kw + '%', '%' + kw + '%'); }
   if (req.query.sub_group) { where += ' AND sub_group = ?'; args.push(String(req.query.sub_group).slice(0, 40)); }
   if (req.query.quality) { where += ' AND quality = ?'; args.push(String(req.query.quality).slice(0, 20)); }
-  const days = Math.min(Math.max(+req.query.days || 0, 1), 3650);
-  if (req.query.days) { where += " AND published_at >= datetime('now', ?)"; args.push('-' + days + ' days'); }
-  if (req.query.subject_id) { where += ' AND bgm_subject_id = ?'; args.push(+req.query.subject_id); }
+  // days 必须是 1~3650 的整数：?days=abc 原来会被静默当成「近 1 天」，
+  // 现在是按「不限时间」处理；?days=1.5 之类小数不再进 SQL
+  const days = clampInt(req.query.days, 0, 0, 3650);
+  if (days > 0) { where += " AND published_at >= datetime('now', ?)"; args.push('-' + days + ' days'); }
+  // subject_id 同理：?subject_id=abc 原来是 NaN -> SQLite datatype mismatch（500）
+  const subjectId = clampInt(req.query.subject_id, 0, 0, 2147483647);
+  if (subjectId > 0) { where += ' AND bgm_subject_id = ?'; args.push(subjectId); }
   if (req.query.my === '1') {
     if (!user) return null;
     where += ' AND bgm_subject_id IN (SELECT subject_id FROM collections WHERE user_id = ? AND status IN (1,3))';
@@ -618,10 +623,8 @@ function buildFilter(req, user) {
 // GET /api/watch/groups?page=1&size=12&source=&q=&sub_group=&quality=&days=&my=1&per_group=3
 router.get('/groups', async (req, res, next) => {
   try {
-    const page = Math.max(+req.query.page || 1, 1);
-    const size = Math.min(Math.max(+req.query.size || 12, 1), 50);
-    const perGroup = Math.min(Math.max(+req.query.per_group || 3, 1), 10);
-    const offset = (page - 1) * size;
+    const { page, size, offset } = paging(req.query, { defSize: 12, maxSize: 50 });
+    const perGroup = clampInt(req.query.per_group, 3, 1, 10);
     const f = buildFilter(req, req.user);
     if (!f) return res.status(401).json({ error: '请先登录后使用"只看我追的"', status: 401 });
     const [rows] = await pool.query(
@@ -694,9 +697,7 @@ router.get('/group-versions', async (req, res, next) => {
 // GET /api/watch/episodes?page=1&size=24&source=&q=&sub_group=&quality=&days=&my=1&sort=pub|size
 router.get('/episodes', async (req, res, next) => {
   try {
-    const page = Math.max(+req.query.page || 1, 1);
-    const size = Math.min(Math.max(+req.query.size || 24, 1), 50);
-    const offset = (page - 1) * size;
+    const { page, size, offset } = paging(req.query, { defSize: 24, maxSize: 50 });
     const f = buildFilter(req, req.user);
     if (!f) return res.status(401).json({ error: '请先登录后使用"只看我追的"', status: 401 });
     const sortSql = req.query.sort === 'size'
@@ -720,7 +721,7 @@ router.get('/episodes', async (req, res, next) => {
 router.get('/my-updates', async (req, res, next) => {
   try {
     if (!req.user) return res.status(401).json({ error: '请先登录', status: 401 });
-    const limit = Math.min(Math.max(+req.query.limit || 8, 1), 30);
+    const limit = clampInt(req.query.limit, 8, 1, 30);
     const [rows] = await pool.query(
       `SELECT c.subject_id, c.name, c.name_cn, c.image,
               e.series_key, e.series_title, e.episode, e.sub_group, e.quality, e.published_at, e.magnet, e.link,

@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { fetch, ProxyAgent } = require('undici');
 const { pool } = require('../db');
+const { strParam, paging, escapeLike, LIKE_ESC } = require('../query');
 const { shrinkCover } = require('../imgutil');
 const { requireOwner } = require('../auth');
 const router = express.Router();
@@ -346,13 +347,18 @@ function startScheduler() {
 // GET /api/news?page=1&size=12&source=gcores&q=xx
 router.get('/', async (req, res, next) => {
   try {
-    const page = Math.max(+req.query.page || 1, 1);
-    const size = Math.min(Math.max(+req.query.size || 12, 1), 50);
-    const offset = (page - 1) * size;
+    const { page, size, offset } = paging(req.query, { defSize: 12, maxSize: 50 });
     const args = [];
     let where = ' WHERE 1=1';
-    if (req.query.source) { where += ' AND source = ?'; args.push(String(req.query.source)); }
-    if (req.query.q) { where += ' AND (title LIKE ? OR summary LIKE ?)'; const like = '%' + String(req.query.q).trim() + '%'; args.push(like, like); }
+    // 参数一律经 query.js 归一化：?source[]=a 这类数组直接进 SQL 同样会抛错
+    const source = strParam(req.query.source).slice(0, 40);
+    if (source) { where += ' AND source = ?'; args.push(source); }
+    const q = strParam(req.query.q).trim();
+    if (q) {
+      where += ' AND (title LIKE ? ' + LIKE_ESC + ' OR summary LIKE ? ' + LIKE_ESC + ')';
+      const like = '%' + escapeLike(q) + '%';
+      args.push(like, like);
+    }
     const [rows] = await pool.query(
       `SELECT id, source, title, summary, link, cover, published_at, created_at FROM news` + where +
       ` ORDER BY datetime(published_at) DESC, id DESC LIMIT ? OFFSET ?`,

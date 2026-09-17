@@ -6,6 +6,7 @@ const { requireOwner } = require('../auth');
 const releasecal = require('../releasecal');
 const bookrelease = require('../bookrelease');
 const { pool } = require('../db');
+const { strParam, clampInt, MAX_PAGE } = require('../query');
 const router = express.Router();
 
 const SUBJECT_TYPES = { 1: 'book', 2: 'anime', 3: 'music', 4: 'game', 6: 'real' };
@@ -54,8 +55,8 @@ router.post('/search', async (req, res, next) => {
     const { keyword = '', type = 2, page = 1, limit = 20, sort = 'match' } = req.body || {};
     const kw = String(keyword).trim().slice(0, 100);
     const types = (Array.isArray(type) && type.length) ? type.map(Number) : [Number(type)];
-    const pageNum = Math.max(+(page) || 1, 1);
-    const pageSize = Math.min(Math.max(+(limit) || 20, 1), 50);
+    const pageNum = clampInt(page, 1, 1, MAX_PAGE);
+    const pageSize = clampInt(limit, 20, 1, 50);
     const offset = (pageNum - 1) * pageSize;
 
     if (!kw) {
@@ -123,8 +124,8 @@ router.get('/subjects/:id', async (req, res, next) => {
 router.get('/subjects/:id/episodes', async (req, res, next) => {
   try {
     const id = +req.params.id;
-    const offset = +(req.query.offset || 0);
-    const limit = Math.min(+(req.query.limit || 100), 200);
+    const offset = clampInt(req.query.offset, 0, 0, MAX_PAGE);
+    const limit = clampInt(req.query.limit, 100, 1, 200);
     const key = `bgm:episodes:${id}:${offset}:${limit}`;
     const token = await resolveSubjectToken();
     const data = await cached(key, 24 * 3600 * 1000, () => bgm(`/v0/episodes?subject_id=${id}&offset=${offset}&limit=${limit}`, token ? { token } : {}));
@@ -264,7 +265,7 @@ router.get('/library/enrich/vndb/status', requireOwner, async (req, res, next) =
 router.post('/library/enrich/vndb', requireOwner, async (req, res, next) => {
   try {
     const body = req.body || {};
-    const limit = Math.min(Math.max(+(body.limit) || 0, 0), 5000);
+    const limit = clampInt(body.limit, 0, 0, 5000);
     const force = !!(body.force);
     const dryRun = !!(body.dryRun);
     if (dryRun || limit > 0) {
@@ -298,13 +299,13 @@ router.get('/browser', async (req, res, next) => {
       const year = /^(19\d{2}|20[0-2]\d)$/.test(String(req.query.year || '').trim()) ? String(req.query.year).trim() : '';
       const region = String(req.query.region || '').trim().slice(0, 10);
       const limit = 24;
-      const out = await queryLibrary({ category, page: +(req.query.page) || 1, limit, sort, keyword, tag, year, region });
+      const out = await queryLibrary({ category, page: clampInt(req.query.page, 1, 1, MAX_PAGE), limit, sort, keyword, tag, year, region });
       return res.json(out);
     }
     // 限制最大页数：bgm.tv 网页榜单实测 420 页以内有内容、430 页起返回空页（约 1 万部为浏览上限）。
     // 超出会得到空页导致前端“翻不动/无内容”，因此固定可浏览上限为 420 页，并校准 total/totalPages。
     const MAX_BROWSER_PAGE = 420;
-    let page = Math.min(Math.max(+(req.query.page) || 1, 1), MAX_BROWSER_PAGE);
+    let page = clampInt(req.query.page, 1, 1, MAX_BROWSER_PAGE);
     const limit = 24; // bgm.tv 榜单每页固定 24 条
     const sort = BROWSER_SORTS.includes(req.query.sort) ? req.query.sort : 'trends'; // 默认近期注目
     // 标签/年份筛选：bgm 网页筛选入口为 /anime/tag/<标签> 与 /anime/tag/<标签>/airtime/<年份>
@@ -401,9 +402,9 @@ router.get('/browser', async (req, res, next) => {
 router.get('/release-calendar', async (req, res, next) => {
   try {
     res.json(await releasecal.getCalendar({
-      recentDays: req.query.recentDays ? +req.query.recentDays : undefined,
-      upcomingDays: req.query.upcomingDays ? +req.query.upcomingDays : undefined,
-      limit: req.query.limit ? +req.query.limit : undefined
+      recentDays: clampInt(req.query.recentDays, 30, 7, 120),
+      upcomingDays: clampInt(req.query.upcomingDays, 45, 7, 180),
+      limit: clampInt(req.query.limit, 18, 1, 60)
     }));
   } catch (e) { next(e); }
 });
@@ -423,10 +424,10 @@ router.post('/release-calendar/scan', requireOwner, async (req, res, next) => {
 router.get('/book-release-calendar', async (req, res, next) => {
   try {
     res.json(await bookrelease.getCalendar({
-      category: req.query.category || 'manga',
-      recentDays: req.query.recentDays ? +req.query.recentDays : undefined,
-      upcomingDays: req.query.upcomingDays ? +req.query.upcomingDays : undefined,
-      limit: req.query.limit ? +req.query.limit : undefined
+      category: strParam(req.query.category, 'manga') || 'manga',
+      recentDays: clampInt(req.query.recentDays, 30, 7, 120),
+      upcomingDays: clampInt(req.query.upcomingDays, 45, 7, 180),
+      limit: clampInt(req.query.limit, 18, 1, 60)
     }));
   } catch (e) { next(e); }
 });

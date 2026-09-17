@@ -2,6 +2,7 @@
 const express = require('express');
 const { bgm, cached, getValidToken } = require('../bangumi');
 const { pool } = require('../db');
+const { clampInt, escapeLike, LIKE_ESC } = require('../query');
 const { requireAuth, requireNotViewer } = require('../auth');
 const router = express.Router();
 router.use('/me', requireAuth);
@@ -32,8 +33,12 @@ function subjectTagNames(s) {
 async function localCounts(userId, subjectType, tags) {
   let where = 'user_id = ?';
   const args = [userId];
-  if (subjectType) { where += ' AND subject_type = ?'; args.push(+subjectType); }
-  for (const t of tags) { where += ' AND (tags LIKE ? OR subject_tags LIKE ?)'; args.push('%' + t + '%', '%' + t + '%'); }
+  const typeNum = clampInt(subjectType, 0, 0, 6);
+  if (typeNum) { where += ' AND subject_type = ?'; args.push(typeNum); }
+  for (const t of tags) {
+    where += ' AND (tags LIKE ? ' + LIKE_ESC + ' OR subject_tags LIKE ? ' + LIKE_ESC + ')';
+    args.push('%' + escapeLike(t) + '%', '%' + escapeLike(t) + '%');
+  }
   const [rows] = await pool.query(`SELECT status, COUNT(*) AS n FROM collections WHERE ${where} GROUP BY status`, args);
   const counts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   let total = 0;
@@ -91,10 +96,18 @@ router.get('/me/collections', async (req, res, next) => {
 
     let where = 'user_id = ?';
     const args = [req.user.id];
-    if (status) { where += ' AND status = ?'; args.push(+status); }
-    if (subjectType) { where += ' AND subject_type = ?'; args.push(+subjectType); }
-    for (const t of tags) { where += ' AND (tags LIKE ? OR subject_tags LIKE ?)'; args.push('%' + t + '%', '%' + t + '%'); }
-    const [rows] = await pool.query(`SELECT * FROM collections WHERE ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`, [...args, Math.min(+limit || 30, 50), +offset || 0]);
+    // 全部经 clampInt 归一化：?status[]=x 会变成 NaN，?limit=1.5 会变成小数，
+    // 两者绑定进 SQL 都会让 node:sqlite 抛错；limit=-1 更会退化成「不限制」从而拉全表
+    const statusNum = clampInt(status, 0, 0, 5);
+    if (statusNum) { where += ' AND status = ?'; args.push(statusNum); }
+    const typeNum = clampInt(subjectType, 0, 0, 6);
+    if (typeNum) { where += ' AND subject_type = ?'; args.push(typeNum); }
+    for (const t of tags) {
+      where += ' AND (tags LIKE ? ' + LIKE_ESC + ' OR subject_tags LIKE ? ' + LIKE_ESC + ')';
+      args.push('%' + escapeLike(t) + '%', '%' + escapeLike(t) + '%');
+    }
+    const [rows] = await pool.query(`SELECT * FROM collections WHERE ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      [...args, clampInt(limit, 30, 1, 50), clampInt(offset, 0, 0, 100000000)]);
     const mapped = rows.map(r => ({
       ...r,
       id: r.subject_id,
@@ -116,7 +129,7 @@ router.get('/me/collections/tags', async (req, res, next) => {
     const { subject_type: subjectType = 2, limit = 60 } = req.query;
     const [rows] = await pool.query(
       'SELECT tags, subject_tags FROM collections WHERE user_id = ? AND subject_type = ?',
-      [req.user.id, +subjectType]
+      [req.user.id, clampInt(subjectType, 2, 1, 6)]
     );
     const counter = new Map();
     for (const r of rows) {
@@ -128,7 +141,7 @@ router.get('/me/collections/tags', async (req, res, next) => {
     const data = [...counter.entries()]
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh'))
-      .slice(0, Math.min(+limit || 60, 200));
+      .slice(0, clampInt(limit, 60, 1, 200));
     res.json({ data });
   } catch (e) { next(e); }
 });

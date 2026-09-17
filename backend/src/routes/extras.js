@@ -2,6 +2,7 @@
 // routes/extras.js - 追番统计 / 公开分享 / 收藏导出 / 个人资料公开设置 / 放送日历 ICS
 const express = require('express');
 const { pool } = require('../db');
+const { clampInt } = require('../query');
 const { requireNotViewer } = require('../auth');
 const { bgm, cached } = require('../bangumi');
 const config = require('../config');
@@ -44,7 +45,7 @@ router.get('/me/calendar-progress', requireNotViewer, async (req, res, next) => 
 router.get('/collections/stats', requireNotViewer, async (req, res, next) => {
   try {
     const uid = req.user.id;
-    const year = Math.max(2000, Math.min(2100, +req.query.year || new Date().getFullYear()));
+    const year = clampInt(req.query.year, new Date().getFullYear(), 2000, 2100);
     const [rows] = await pool.query(
       'SELECT * FROM collections WHERE user_id = ? AND subject_type = 2', [uid]
     );

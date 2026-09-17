@@ -10,6 +10,7 @@
 // 前端展示：Galgame tab 顶部「🎮 Galgame 新作 · 发售日历」（GET /api/anime/release-calendar）。
 const vndb = require('./vndb');
 const { pool } = require('./db');
+const { clampInt } = require('./query');
 const rssconfig = require('./rssconfig');
 const notify = require('./notify');
 
@@ -259,9 +260,10 @@ async function sendDigest(today) {
 // ---------- 对外 API ----------
 async function getCalendar({ recentDays = 30, upcomingDays = 45, limit = 18 } = {}) {
   const today = todayStr();
-  const recentFrom = addDays(today, -Math.min(Math.max(+(recentDays) || 30, 7), 120));
-  const upcomingTo = addDays(today, Math.min(Math.max(+(upcomingDays) || 45, 7), 180));
-  const lim = Math.min(Math.max(+(limit) || 18, 1), 60);
+  // 必须夹成整数：1.5 这类小数原样传给 SQL LIMIT 会让 node:sqlite 抛 datatype mismatch
+  const recentFrom = addDays(today, -clampInt(recentDays, 30, 7, 120));
+  const upcomingTo = addDays(today, clampInt(upcomingDays, 45, 7, 180));
+  const lim = clampInt(limit, 18, 1, 60);
   const [recent, upcoming, state] = await Promise.all([
     queryWindow(recentFrom, today, 'DESC', lim, today),
     queryWindow(addDays(today, 1), upcomingTo, 'ASC', lim, today),

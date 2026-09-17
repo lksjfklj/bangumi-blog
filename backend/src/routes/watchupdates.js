@@ -2,6 +2,7 @@
 // routes/watchupdates.js - 追番新话更新·未读/已读（updatepusher 落库后供前端角标与列表使用）
 const express = require('express');
 const { pool } = require('../db');
+const { clampInt } = require('../query');
 const { requireNotViewer } = require('../auth');
 const router = express.Router();
 
@@ -12,7 +13,7 @@ router.use(requireNotViewer);
 router.get('/updates/unread', async (req, res, next) => {
   try {
     if (!req.user) return res.status(401).json({ error: '请先登录', status: 401 });
-    const limit = Math.min(Math.max(+req.query.limit || 100, 1), 200);
+    const limit = clampInt(req.query.limit, 100, 1, 200);
     const [rows] = await pool.query(
       "SELECT wu.id, wu.subject_id, wu.series_title, wu.name_cn, wu.name, wu.episode, wu.sub_group, " +
       "wu.quality, wu.magnet, wu.link, wu.published_at, wu.read, wu.created_at, COALESCE(c.image, '') AS image " +
