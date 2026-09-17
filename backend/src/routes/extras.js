@@ -177,6 +177,14 @@ router.get('/share/:uid', async (req, res, next) => {
 });
 
 // ---------- 收藏数据导出备份 ----------
+// CSV 单元格转义：逗号/引号/换行必须整个用双引号包起来；公式前缀还要额外加 ' 断开
+function csvEsc(v) {
+  let s = v == null ? '' : String(v);
+  // 防 CSV 公式注入：Excel/WPS/Sheets 会把以 = + - @ 或制表符/回车开头的内容当公式执行
+  //（=cmd|'/c calc'!A1 之类的 DDE，或 =WEBSERVICE/HYPERLINK 把本地数据外发）
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
 // GET /api/collections/export-download?format=json|csv
 router.get('/collections/export-download', requireNotViewer, async (req, res, next) => {
   try {
@@ -187,15 +195,12 @@ router.get('/collections/export-download', requireNotViewer, async (req, res, ne
     );
     const stamp = new Date().toISOString().slice(0, 10);
     if (fmt === 'csv') {
-      const esc = (v) => {
-        const s = v == null ? '' : String(v);
-        return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-      };
       const head = ['subject_id', 'subject_type', 'name', 'name_cn', 'image', 'status', 'score', 'ep_status', 'comment', 'tags', 'updated_at'];
       const lines = [head.join(',')];
       for (const c of rows) {
         const tags = [...parseTags(c.tags), ...parseTags(c.subject_tags)].filter(Boolean).join('|');
-        lines.push([c.subject_id, c.subject_type, esc(c.name), esc(c.name_cn), esc(c.image), c.status, c.score, c.ep_status, esc(c.comment), esc(tags), c.updated_at].join(','));
+        // 所有文本列都过 csvEsc：subject_type / status 同样是用户可控字段
+        lines.push([c.subject_id, csvEsc(c.subject_type), csvEsc(c.name), csvEsc(c.name_cn), csvEsc(c.image), csvEsc(c.status), c.score, c.ep_status, csvEsc(c.comment), csvEsc(tags), c.updated_at].join(','));
       }
       const buf = '\uFEFF' + lines.join('\r\n'); // BOM 便于 Excel 正确识别 UTF-8
       res.setHeader('Content-Disposition', 'attachment; filename="bangumi-collections-' + stamp + '.csv"');
@@ -216,7 +221,14 @@ function toIcsDate(d) {
   return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + 'T' + p(d.getUTCHours()) + '0000Z';
 }
 function escIcs(s) {
-  return String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+  return String(s || '')
+    // 其余控制字符（除 \t \n \r）会破坏 ICS 结构，先剔除
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    // 注意单独一个 \r 也算换行，旧写法 /\r?\n/ 漏掉了它，会直接把 ICS 行切断
+    .replace(/\r\n|\r|\n/g, '\\n');
 }
 
 router.get('/calendar.ics', async (req, res, next) => {
@@ -294,4 +306,7 @@ router.get('/calendar.ics', async (req, res, next) => {
 });
 
 module.exports = router;
+// 顺带导出给单测用；server.js 里依然是 app.use('/api', require('./routes/extras'))
+module.exports.csvEsc = csvEsc;
+module.exports.escIcs = escIcs;
 

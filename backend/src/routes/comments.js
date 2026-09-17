@@ -4,9 +4,22 @@ const express = require('express');
 const { pool } = require('../db');
 const { requireOwner } = require('../auth');
 const { clientIpOf } = require('../security');
+const { parseId, cleanName } = require('../query');
 const router = express.Router();
 
 const MAX_LEN = 2000;
+
+// 站长昵称/用户名：评论列表只显示昵称，冒名等于伪造"站长回复"，禁止其他用户使用
+async function ownerNameSet() {
+  try {
+    const [rows] = await pool.query('SELECT username, nickname FROM users WHERE is_owner = 1');
+    const set = new Set();
+    for (const r of rows) {
+      for (const v of [r.username, r.nickname]) if (v) set.add(String(v).trim().toLowerCase());
+    }
+    return set;
+  } catch (e) { return new Set(); }
+}
 
 // 递归组装评论树
 function treeOf(rows) {
@@ -44,12 +57,32 @@ router.post('/posts/:slug/comments', async (req, res, next) => {
     const body = req.body || {};
     const content = String(body.content || '').trim().slice(0, MAX_LEN);
     if (!content) return res.status(400).json({ error: '评论内容不能为空' });
-    let name = String(body.name || '').trim().slice(0, 40);
-    if (req.user) name = name || req.user.nickname || req.user.username || '匿名';
+    const isRequestOwner = !!(req.user && +req.user.is_owner === 1 && req.user.kind !== 'viewer');
+    // 昵称：登录用户一律用账号昵称，忽略请求里的 name（否则任何登录用户都能冒充别人）；
+    // 匿名用户可用昵称，但清洗后不许与站长昵称/用户名重复
+    let name = req.user
+      ? cleanName(req.user.nickname || req.user.username)
+      : cleanName(body.name);
     if (!name) name = '匿名';
-    const parentId = Math.max(0, +body.parent_id || 0);
-    const isOwner = !!(req.user && +req.user.is_owner === 1 && req.user.kind !== 'viewer');
-    const status = isOwner ? 'approved' : 'pending';
+    if (!isRequestOwner && name !== '匿名') {
+      const banned = await ownerNameSet();
+      if (banned.has(name.toLowerCase())) name = '匿名';
+    }
+    // parent_id：必须是正整数，且是同一篇文章下已通过的评论
+    // 旧写法 Math.max(0, +body.parent_id || 0) 允许"回复其他文章的评论"或回复不存在的 id，
+    // 评论树里就会挂出一批父节点永远不存在的孤儿节点
+    let parentId = 0;
+    const rawParent = String(body.parent_id == null ? '' : body.parent_id).trim();
+    if (rawParent && rawParent !== '0') {
+      parentId = parseId(rawParent);
+      if (!parentId) return res.status(400).json({ error: '父评论 id 无效' });
+      const [parents] = await pool.query(
+        "SELECT id FROM comments WHERE id = ? AND post_id = ? AND status = 'approved'",
+        [parentId, posts[0].id]
+      );
+      if (!parents.length) return res.status(400).json({ error: '父评论不存在或未通过审核' });
+    }
+    const status = isRequestOwner ? 'approved' : 'pending';
     const ip = clientIpOf(req) || '';
     await pool.query(
       'INSERT INTO comments (post_id, parent_id, user_id, name, content, status, ip) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -79,7 +112,8 @@ router.get('/comments', requireOwner, async (req, res, next) => {
 // PUT /api/blog/comments/:id  { status: 'approved' | 'spam' | 'pending' }
 router.put('/comments/:id', requireOwner, async (req, res, next) => {
   try {
-    const id = +req.params.id;
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: '评论 id 无效' });
     const status = String((req.body || {}).status || '').slice(0, 20);
     if (!['approved', 'spam', 'pending'].includes(status)) return res.status(400).json({ error: '状态无效' });
     await pool.query('UPDATE comments SET status = ? WHERE id = ?', [status, id]);
@@ -91,7 +125,8 @@ router.put('/comments/:id', requireOwner, async (req, res, next) => {
 // DELETE /api/blog/comments/:id
 router.delete('/comments/:id', requireOwner, async (req, res, next) => {
   try {
-    const id = +req.params.id;
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: '评论 id 无效' });
     await pool.query('DELETE FROM comments WHERE id = ?', [id]);
     await pool.query('DELETE FROM comments WHERE parent_id = ?', [id]);
     res.json({ ok: true });

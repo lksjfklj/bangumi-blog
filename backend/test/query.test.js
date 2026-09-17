@@ -3,7 +3,7 @@
 // 任何 NaN/小数/负数漏进 SQL 都会变成 500 或者「LIMIT -1 = 不限制」这类越权行为。
 const test = require('node:test');
 const assert = require('node:assert');
-const { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE } = require('../src/query');
+const { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE, parseId, cleanName } = require('../src/query');
 
 test('strParam: 数组只取第一个元素（?tag[]=a&tag[]=b）', () => {
   assert.strictEqual(strParam(['a', 'b']), 'a');
@@ -86,4 +86,24 @@ test('escapeLike: % _ \\ 全部转义', () => {
 
 test('LIKE_ESC: 是合法的 SQL ESCAPE 子句', () => {
   assert.strictEqual(LIKE_ESC, "ESCAPE '\\'");
+});
+
+test('parseId: 只接受纯十进制正整数，其余一律 0', () => {
+  assert.strictEqual(parseId('12'), 12);
+  assert.strictEqual(parseId(12), 12);
+  assert.strictEqual(parseId(['34', '56']), 34);
+  for (const bad of ['0', 'abc', '1.5', '1e309', '12abc', '-3', '  ', '', '99999999999999999999',
+    undefined, null, true, {}, 1.5, Infinity, NaN, '0x10', '1 2']) {
+    assert.strictEqual(parseId(bad), 0, JSON.stringify(String(bad)) + ' 应为 0');
+  }
+});
+
+test('cleanName: 控制字符/换行折成单行并截断', () => {
+  assert.strictEqual(cleanName('  路人甲  '), '路人甲');
+  assert.strictEqual(cleanName('站长\r\n\u0000冒充'), '站长 冒充');
+  assert.strictEqual(cleanName('a\t\tb'), 'a b');
+  assert.strictEqual(cleanName('x'.repeat(80)).length, 40);
+  assert.strictEqual(cleanName(undefined), '');
+  assert.strictEqual(cleanName(null), '');
+  assert.strictEqual(cleanName(['甲', '乙']), '甲');
 });

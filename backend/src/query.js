@@ -48,4 +48,22 @@ function escapeLike(s) {
 // 放在这里集中定义，路由里就不用再写容易出错的反斜杠字面量。
 const LIKE_ESC = "ESCAPE '\\'";
 
-module.exports = { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE };
+// 路径/请求体里的自增 id：只接受纯十进制正整数。
+// 旧写法 +req.params.id 会把 '1e309' 变 Infinity、'1.5' 变 1.5、'abc' 变 NaN 直接塞进 SQL，
+// 返回 0 表示"非法"，调用方应当直接回 400 而不是继续查库。
+function parseId(v) {
+  const s = strParam(Array.isArray(v) ? v[0] : v, '').trim();
+  return /^[1-9]\d{0,14}$/.test(s) ? Number(s) : 0;
+}
+
+// 昵称一类短文本：控制字符/换行会破坏页面布局，也便于伪装成"多行官方回复"，
+// 统一折成单行后截断
+function cleanName(v, max = 40) {
+  return strParam(v, '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+module.exports = { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE, parseId, cleanName };
