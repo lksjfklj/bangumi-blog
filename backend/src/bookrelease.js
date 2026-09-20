@@ -15,6 +15,7 @@
 const bangumi = require('./bangumi');
 const { pool } = require('./db');
 const rssconfig = require('./rssconfig');
+const { seriesKeysOf, normalizeDate } = require('./librarydate');
 
 const STATE_KEY = 'bgm_book_release_cal_state';
 
@@ -163,6 +164,80 @@ async function queryWindow(category, from, to, dir, limit, today) {
   return { items: (rows || []).map(r => rowToItem(r, today)), total: Number((tot[0] && tot[0].n) || 0) };
 }
 
+// ---------- 「最新一卷」回写 ----------
+// bgm 列表接口的 date 对书籍是「系列首卷首发日」（剑风传奇 1990-11-26、SLAM DUNK 完全版 2001-03-19），
+// 拿它排「近期注目」只能排出老经典。日历里每一行都是一次「新卷登载」，把它的日期按「剥掉卷号」后的
+// 系列名匹配回库内条目，就得到该系列最新一卷的发售日（供 library.js 的 trends 排序使用）。
+// 匹配双路：subject_id 直接命中（库里收过这个分卷条目）+ 系列名归一化命中（库里收的是系列主体）。
+// 只增不减（写入时要求比现值更新），所以重扫旧窗口、旧卷补录都不会把已记录的新卷日期冲掉。
+let latestRefreshing = false;
+let latestLast = null;
+
+async function syncLatestDates() {
+  if (latestRefreshing) return { ok: false, reason: 'already running' };
+  latestRefreshing = true;
+  const t0 = Date.now();
+  try {
+    const [libRows] = await pool.query(
+      `SELECT subject_id, category, name, name_cn, COALESCE(latest_date, '') AS latest_date
+       FROM library_subjects WHERE category IN ('manga', 'lightnovel')`
+    );
+    const byId = new Map();
+    const byKey = new Map();
+    for (const r of libRows || []) {
+      byId.set(String(r.subject_id) + '|' + r.category, r);
+      for (const k of seriesKeysOf(r.name, r.name_cn)) {
+        const list = byKey.get(k);
+        if (list) list.push(r);
+        else byKey.set(k, [r]);
+      }
+    }
+    const [calRows] = await pool.query(
+      'SELECT subject_id, category, name, name_cn, date FROM bgm_book_release_calendar'
+    );
+    const pending = new Map(); // 'subject_id|category' -> 待写日期（同一行取最新）
+    const consider = (row, date) => {
+      if (!row) return;
+      const d = normalizeDate(date);
+      if (!d) return;
+      if (String(row.latest_date || '') >= d) return; // 库里已是更新的日期
+      const key = String(row.subject_id) + '|' + row.category;
+      const prev = pending.get(key);
+      if (prev && prev >= d) return;                  // 本轮已有更新的候选
+      pending.set(key, d);
+    };
+    for (const c of calRows || []) {
+      consider(byId.get(String(c.subject_id) + '|' + c.category), c.date);
+      for (const k of seriesKeysOf(c.name, c.name_cn)) {
+        for (const row of byKey.get(k) || []) consider(row, c.date);
+      }
+    }
+    let updated = 0;
+    for (const [key, date] of pending) {
+      const sep = key.lastIndexOf('|');
+      const [res] = await pool.query(
+        `UPDATE library_subjects SET latest_date = ?
+         WHERE subject_id = ? AND category = ? AND COALESCE(latest_date, '') < ?`,
+        [date, key.slice(0, sep), key.slice(sep + 1), date]
+      );
+      updated += Number((res && res.affectedRows) || 0);
+    }
+    latestLast = {
+      at: new Date().toISOString(), updated, candidates: pending.size,
+      calendar: (calRows || []).length, library: (libRows || []).length
+    };
+    if (updated) console.log('[bookrelease] 最新一卷日期回写 updated=' + updated);
+    return { ok: true, ...latestLast, elapsedMs: Date.now() - t0 };
+  } catch (e) {
+    const msg = String((e && e.message) || e).slice(0, 500);
+    latestLast = { at: new Date().toISOString(), error: msg };
+    console.error('[bookrelease] 最新一卷日期回写失败:', msg);
+    return { ok: false, error: msg };
+  } finally {
+    latestRefreshing = false;
+  }
+}
+
 // ---------- 主扫描 ----------
 // 从 offset 0 沿 date 倒序流向前走：远未来/空日期快速跳过，进入窗口后 upsert，
 // 直到整页日期都已早于窗口左界（date 流有序）即停。
@@ -213,12 +288,15 @@ async function scanOnce(opts = {}) {
     }
     stats.truncated = stats.pages >= MAX_PAGES;
     const pruned = await pruneOld(today);
-    const nextState = { lastRunAt: new Date().toISOString(), lastStats: stats, pruned };
+    // 顺手把窗口里的「最新一卷」日期回写到库内系列（本地纯计算，不额外发请求）
+    const latest = await syncLatestDates();
+    const nextState = { lastRunAt: new Date().toISOString(), lastStats: stats, pruned, latest };
     await rssconfig.setSetting(STATE_KEY, nextState);
-    last = { at: now, ok: true, stats, pruned };
+    last = { at: now, ok: true, stats, pruned, latest };
     console.log('[bookrelease] 扫描完成 pages=' + stats.pages + ' saved=' + stats.saved +
-      ' future=' + stats.skippedFuture + ' old=' + stats.skippedOld + ' pruned=' + pruned + ' truncated=' + stats.truncated);
-    return { ok: true, stats, pruned, elapsedMs: Date.now() - t0 };
+      ' future=' + stats.skippedFuture + ' old=' + stats.skippedOld + ' pruned=' + pruned +
+      ' latest=' + (latest.updated || 0) + ' truncated=' + stats.truncated);
+    return { ok: true, stats, pruned, latest, elapsedMs: Date.now() - t0 };
   } catch (e) {
     const msg = String((e && e.message) || e).slice(0, 500);
     const prev = (await rssconfig.getSetting(STATE_KEY, {})) || {};
@@ -289,6 +367,7 @@ async function getStatus() {
     lastError: state.lastError || null,
     lastStats: state.lastStats || null,
     summary,
+    latestRefresh: latestLast,
     inMemory: last
   };
 }
@@ -305,6 +384,6 @@ function runOnce(opts) {
 }
 
 module.exports = {
-  scanOnce, runOnce, startScheduler, getCalendar, getStatus,
+  scanOnce, runOnce, startScheduler, getCalendar, getStatus, syncLatestDates,
   todayStr, addDays, dateLabel, classifyPlatform
 };

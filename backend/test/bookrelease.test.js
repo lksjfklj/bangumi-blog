@@ -14,6 +14,8 @@ const { todayStr, addDays } = bookrelease;
 
 const STATE_KEY = 'bgm_book_release_cal_state';
 const ID_BASE = 900200000;
+// 「最新一卷」回写测试用的独立假 ID 段（不与 90000101 / 900200xxx 等其它测试段冲突）
+const LATEST_ID_BASE = 900300001;
 const q = (sql, p = []) => pool.query(sql, p)[0];
 
 const today = todayStr();
@@ -67,6 +69,7 @@ after(async () => {
   bangumi.bgm = origBgm;
   await pool.query('DELETE FROM bgm_book_release_calendar WHERE subject_id >= ?', [ID_BASE]);
   await pool.query('DELETE FROM library_subjects WHERE subject_id = ? AND category = ?', [LN_TEST_ID, 'lightnovel']);
+  await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [LATEST_ID_BASE]);
   await pool.query('DELETE FROM settings WHERE key = ?', [STATE_KEY]);
 });
 
@@ -153,4 +156,67 @@ test('getStatus: 汇总可见', async () => {
   assert.ok(st.summary.lightnovel >= inWindowDays);
   assert.ok(st.summary.upcoming >= 45);
   assert.ok(st.lastRunAt);
+});
+
+// ---------- 「最新一卷」日期回写（syncLatestDates） ----------
+// 语义：日历窗口里每一行 = 一次新卷登载，把它按「剥掉卷号后的系列名（原名/中文名）」或「subject_id 直连」
+//       匹配回库内条目并写进 latest_date（供 library.js 的 sort=trends 排序），只增不减。
+const S_ID = LATEST_ID_BASE;         // 库内系列主体，靠「剥卷号后的名字」命中
+const S_DIRECT = LATEST_ID_BASE + 1; // 库内条目，靠 subject_id 直连命中
+const S_CN = LATEST_ID_BASE + 2;     // 库内条目，靠中文名命中
+
+async function insLib(id, name, nameCn, airDate, latest) {
+  await pool.query(
+    `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, latest_date, blocked, updated_at)
+     VALUES (?, 'manga', ?, ?, '', ?, 7.5, 10, 0, '漫画', '[]', '[]', ?, 0, ?)
+     ON CONFLICT(subject_id, category) DO UPDATE SET
+       name = excluded.name, name_cn = excluded.name_cn, air_date = excluded.air_date,
+       latest_date = excluded.latest_date, updated_at = excluded.updated_at`,
+    [id, name, nameCn, airDate, latest, Date.now()]);
+}
+async function insCal(id, category, name, nameCn, date) {
+  await pool.query(
+    `INSERT INTO bgm_book_release_calendar (subject_id, category, name, name_cn, image, date, platform, rating_score, rating_total, rank, meta_tags, created_at, updated_at)
+     VALUES (?, ?, ?, ?, '', ?, '漫画', 0, 0, 0, '[]', ?, ?)
+     ON CONFLICT(subject_id) DO UPDATE SET category = excluded.category, name = excluded.name,
+       name_cn = excluded.name_cn, date = excluded.date, updated_at = excluded.updated_at`,
+    [id, category, name, nameCn, date, Date.now(), Date.now()]);
+}
+
+test('syncLatestDates: 系列名（原名/中文名）与 id 直连两路命中、多行取最新、只增不减', async () => {
+  await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [LATEST_ID_BASE]);
+  await pool.query('DELETE FROM bgm_book_release_calendar WHERE subject_id >= ?', [LATEST_ID_BASE]);
+  await insLib(S_ID, 'テスト最新卷シリーズ', '测试最新卷系列', '1990-01-01', '');
+  await insLib(S_DIRECT, '月間ダイレクトテスト', '月刊直连测试', '1990-01-01', '');
+  await insLib(S_CN, 'テスト中文シリーズ', '测试中文系列', '1990-01-01', '');
+  const v3 = addDays(today, -20);
+  const v5 = addDays(today, 10);
+  await insCal(LATEST_ID_BASE + 10, 'manga', 'テスト最新卷シリーズ (3)', '', v3);
+  await insCal(LATEST_ID_BASE + 11, 'manga', 'テスト最新卷シリーズ (5)', '', v5);
+  // id 直连：这条日历行的名字剥不出系列名，只能靠 subject_id 对上
+  await insCal(S_DIRECT, 'manga', '月間ダイレクトテスト 別巻', '', addDays(today, -3));
+  // 中文名路：原名对不上、中文名剥掉卷号后能对上
+  await insCal(LATEST_ID_BASE + 12, 'manga', 'テスト中文シリーズ・完全版', '测试中文系列 第2巻', addDays(today, -2));
+
+  const res = await bookrelease.syncLatestDates();
+  assert.equal(res.ok, true);
+  assert.ok(res.updated >= 3, '至少三条应被回写，实际 ' + res.updated);
+  const got = (id) => q('SELECT latest_date FROM library_subjects WHERE subject_id = ?', [id])[0].latest_date;
+  assert.equal(got(S_ID), v5, '同一系列多行命中时取最晚的一卷');
+  assert.equal(got(S_DIRECT), addDays(today, -3), 'subject_id 直连命中');
+  assert.equal(got(S_CN), addDays(today, -2), '中文名剥卷号后命中');
+
+  // 只增不减：补一条更早的旧卷、再把库内值改成更晚的日期，重跑都不许回退
+  await insCal(LATEST_ID_BASE + 13, 'manga', 'テスト最新卷シリーズ 第1巻', '', addDays(today, -400));
+  const res2 = await bookrelease.syncLatestDates();
+  assert.equal(res2.ok, true);
+  assert.equal(got(S_ID), v5, '重扫旧卷不能冲掉已记录的新卷日期');
+  await pool.query('UPDATE library_subjects SET latest_date = ? WHERE subject_id = ?', [addDays(today, 300), S_ID]);
+  await bookrelease.syncLatestDates();
+  assert.equal(got(S_ID), addDays(today, 300), '库里已是更晚的日期时不许回退');
+
+  // 状态快照可见（管理页/诊断用）
+  const st = await bookrelease.getStatus();
+  assert.ok(st.latestRefresh && st.latestRefresh.at);
+  assert.ok(st.latestRefresh.library >= 3);
 });

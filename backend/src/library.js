@@ -14,6 +14,8 @@ const { bgm, getValidToken } = require('./bangumi');
 const vndb = require('./vndb');
 const { pool } = require('./db');
 const { strParam, clampInt, escapeLike, LIKE_ESC, MAX_PAGE } = require('./query');
+const { normalizeDate } = require('./librarydate');
+const bookrelease = require('./bookrelease'); // 书籍「最新一卷」日期回写（本地计算，不额外请求 bgm）
 
 // 允许地区（中，含香港台湾；日；韩）
 const ALLOWED_REGIONS = ['日本', '中国', '韩国', '台湾', '香港'];
@@ -25,6 +27,7 @@ const CATEGORY_SQL = { manga: "category = 'manga'", lightnovel: "category = 'lig
 
 let syncing = false;
 let lastSync = null; // { ok, at, counts }
+let latestBackfilled = false; // 进程内只做一遍「最新一卷 / 最新发售日」回填（纯本地，零外部请求）
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -325,6 +328,11 @@ async function runSync(options = {}) {
     if (doBooks) await setMeta('last_run', lastSync.at);       // 书籍 12h 周期基准
     if (doGames) await setMeta('last_run_games', lastSync.at); // 游戏 7 天周期基准
     await setMeta('counts', JSON.stringify(mergedCounts));
+    if (doBooks) {
+      // 书籍入库后，用日历窗口里已探明的新卷发售日回写「最新一卷」（纯本地计算，不额外发 bgm 请求）
+      const latest = await bookrelease.syncLatestDates();
+      if (latest && latest.ok && latest.updated) console.log('[library] 最新一卷日期回写 updated=' + latest.updated);
+    }
     if (doGames) {
       // 游戏同步完成后，后台启动 VNDB 元数据回填（幂等/游标续跑，不占用 bgm 同步锁）
       const kr = kickVndbEnrich();
@@ -425,11 +433,50 @@ async function upsertVndbMap(bgmId, fields) {
   );
 }
 
+// 从 ext.vndb.released 取 VNDB 发售日（Galgame 没有「分卷」，作品发售日就是它的最新发售日）
+function releasedFromExt(extJson) {
+  try {
+    const ext = JSON.parse(extJson || '{}');
+    return normalizeDate(ext && ext.vndb && ext.vndb.released);
+  } catch (e) { return ''; }
+}
+
+// 写进 latest_date（只写更新的日期：回填重跑 / 旧数据重扫都不会把新发售日冲掉）
+async function applyLatestFromExt(bgmId, extJson) {
+  const d = releasedFromExt(extJson);
+  if (!d) return 0;
+  const [res] = await pool.query(
+    `UPDATE library_subjects SET latest_date = ?
+     WHERE subject_id = ? AND category = 'galgame' AND COALESCE(latest_date, '') < ?`,
+    [d, bgmId, d]
+  );
+  return Number((res && res.affectedRows) || 0);
+}
+
 async function setVndbExt(bgmId, extJson) {
   await pool.query(
     "UPDATE library_subjects SET ext = ? WHERE subject_id = ? AND category = 'galgame'",
     [extJson, bgmId]
   );
+  // 顺手把 VNDB 发售日同步进 latest_date（「近期注目」按最新发售日排序用）
+  await applyLatestFromExt(bgmId, extJson);
+}
+
+// 存量 galgame 的 latest_date 回填：ext.vndb.released 早就在库里，纯本地一遍过、零外部请求。
+// 升级后老库的 ext 是旧版代码写的（没有这一列），首次启动 ensureSync 会调用它补齐。
+async function refreshGalgameLatest() {
+  const out = { scanned: 0, updated: 0 };
+  try {
+    const [rows] = await pool.query(
+      `SELECT subject_id AS id, ext FROM library_subjects
+       WHERE category = 'galgame' AND ext IS NOT NULL AND ext NOT IN ('', '{}')`
+    );
+    for (const r of rows || []) {
+      out.scanned++;
+      out.updated += await applyLatestFromExt(r.id, r.ext);
+    }
+  } catch (e) { out.error = e.message; }
+  return out;
 }
 
 // 单条目回填：返回 { action, id, ... }，action ∈ ok/refresh/nomatch/review/skip/error
@@ -646,6 +693,14 @@ async function ensureSync() {
     if (!gRows[0].n || gamesStale) {
       await runSync({ types: [4] });
     }
+    // 本地回填「最新一卷 / 最新发售日」：书籍（日历窗口探到的系列卷）/ Galgame（VNDB released）。
+    // 升级后老库的 latest_date 全是空的，这里补一遍（每进程一次，之后靠 bookrelease 6h 扫描与 VNDB 回填持续维护）
+    if (!latestBackfilled) {
+      latestBackfilled = true;
+      const gl = await refreshGalgameLatest();
+      const bk = await bookrelease.syncLatestDates();
+      console.log('[library] 最新日期回填 galgame=' + (gl.updated || 0) + ' books=' + ((bk && bk.updated) || 0));
+    }
     // 存量 galgame 从未做过 VNDB 回填（老库部署/手工补库后），后台补一轮
     if (!(await getMeta('vndb_last_run'))) kickVndbEnrich();
   } catch (e) { console.error('[library] ensureSync fail:', e.message); }
@@ -700,14 +755,23 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   const lastPage = Math.max(1, Math.ceil(total / lim));
   const safePage = Math.min(pg, lastPage);
   const offset = (safePage - 1) * lim;
+  // 「近期注目」：按「最新一卷 / 最新发售日」排。
+  // latest_date 由 bookrelease 扫日历窗口回写（书籍：剥掉卷号后匹配回系列）与 VNDB released 回写（Galgame）；
+  // 没探明（老数据、窗口外、匹配不上）的回落 air_date（系列首卷首发日），长尾不会塌成空列表。
+  // 分两段：近 365 天内有新卷/新作的排前面并按日期倒序；+180 天以外才定档的以及库里的脏日期不算「近期」，
+  // 否则一条 2099 年的错日期会永远占着头名。其余按热度兜底 —— 9 千多条老书按首卷日期排会压成「老作品展」。
+  const effDate = "COALESCE(NULLIF(latest_date, ''), air_date)";
+  const isRecent = `(${effDate} >= date('now', '-365 day') AND ${effDate} <= date('now', '+180 day'))`;
   const order = sort === 'title' ? 'ORDER BY name_cn ASC, name ASC'
     : sort === 'rating' ? 'ORDER BY rating_score DESC, rating_total DESC'
     : sort === 'trends'
-      ? "ORDER BY CASE WHEN air_date BETWEEN date('now', '-365 day') AND date('now') THEN 0 ELSE 1 END, rating_total DESC, air_date DESC, rank ASC"
+      ? `ORDER BY CASE WHEN ${isRecent} THEN 0 ELSE 1 END,` +
+        ` CASE WHEN ${isRecent} THEN ${effDate} ELSE NULL END DESC,` +
+        ` rating_total DESC, ${effDate} DESC, rank ASC`
       : 'ORDER BY rank ASC, rating_score DESC';
   const [rows] = await pool.query(
     `SELECT subject_id AS id, category, name, name_cn, image, air_date,
-            rating_score, rating_total, rank, platform, tags, regions
+            rating_score, rating_total, rank, platform, tags, regions, latest_date
      FROM library_subjects WHERE ${whereSql} ${order} LIMIT ? OFFSET ?`,
     [...params, lim, offset]
   );
@@ -725,6 +789,8 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
       name_cn: r.name_cn || r.name,
       images: imgs,
       air_date: r.air_date,
+      // 最新一卷 / 最新发售日（trends 排序用的有效日期；空表示尚未探明，前端按 air_date 展示）
+      latest_date: r.latest_date || '',
       rating: r.rating_total ? { score: r.rating_score, total: r.rating_total } : undefined,
       rank: r.rank || undefined,
       platform: r.platform,
@@ -753,4 +819,4 @@ async function getStatus() {
   };
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus, runVndbSync, vndbStatus, kickVndbEnrich, mergeExt };
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus, runVndbSync, refreshGalgameLatest, vndbStatus, kickVndbEnrich, mergeExt };

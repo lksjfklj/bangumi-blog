@@ -392,6 +392,16 @@ CREATE INDEX IF NOT EXISTS idx_sync_req_status ON collection_sync_requests(statu
 
     }
   },
+  {
+    id: 11,
+    name: 'library-latest-date-v11',
+    fn: () => {
+      // 「最新一卷 / 最新发售日」：书籍由 bookrelease 扫日历窗口时按「剥卷号」匹配回写，
+      // Galgame 由 VNDB 回填的 ext.vndb.released 回写；library.js 的「近期注目」按它排序。
+      // 空串表示「尚未探明」，排序时回落到 air_date（系列首卷首发日），兼容升级前的老数据。
+      ensureColumn('library_subjects', 'latest_date', "latest_date TEXT DEFAULT ''");
+    }
+  },
 ];
 
 function runMigrations() {

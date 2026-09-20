@@ -1,7 +1,10 @@
 // library.test.js - 本地内容库分类器单测（书籍 classify / 游戏 classifyGame）
-const { test } = require('node:test');
+const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, classifyGame, regionsOf } = require('../src/library');
+const { classify, classifyGame, regionsOf, queryLibrary } = require('../src/library');
+const { initDb, pool } = require('../src/db');
+
+initDb(); // 「近期注目」排序走真实 SQLite，这里直接在开发库上验排序语义
 
 const mkBook = (platform, meta = [], tags = []) => ({
   platform,
@@ -106,4 +109,46 @@ test('regionsOf: 中日韩区域标签识别，无标签为空数组', () => {
   const r = regionsOf(mkBook('漫画', [], ['日本', '日常']));
   assert.deepEqual(r, ['日本']);
   assert.deepEqual(regionsOf(mkBook('漫画', [], ['日常'])), []);
+});
+
+// ---------- queryLibrary「近期注目」（sort=trends）排序语义 ----------
+// 书籍的 air_date 是「系列首卷首发日」，latest_date 才是「最新一卷 / 最新发售日」（由 bookrelease 日历回写）。
+// 语义：近 365 天内有新卷的排前面并按日期倒序；未来 180 天以外的脏日期不算近期；其余回落首卷日 + 热度兜底。
+const T_ID_BASE = 900400001; // 独立假 ID 段
+const dayStr = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+
+async function insTestBook(id, name, latest, ratingTotal, rank) {
+  await pool.query(
+    `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, latest_date, blocked, updated_at)
+     VALUES (?, 'manga', ?, ?, '', '1990-11-26', 8, ?, ?, '漫画', '[]', '["日本"]', ?, 0, ?)
+     ON CONFLICT(subject_id, category) DO UPDATE SET name = excluded.name, latest_date = excluded.latest_date,
+       rating_total = excluded.rating_total, rank = excluded.rank, blocked = 0, updated_at = excluded.updated_at`,
+    [id, name, name, ratingTotal, rank, latest, Date.now()]);
+}
+
+test('queryLibrary sort=trends: 有新卷的压过老经典，脏未来日期不抢头名，未探明的回落热度', async () => {
+  const RECENT = T_ID_BASE + 1;   // 有最新一卷（窗口内）
+  const MIDDLE = T_ID_BASE + 2;   // 有最新一卷（刚过去不久）
+  const OLDHOT = T_ID_BASE + 3;   // 老经典：没有 latest_date，热度最高
+  const DIRTY = T_ID_BASE + 4;    // 库里脏日期 2099：既不是近期，也不该因为“日期最大”排前面
+  await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [T_ID_BASE]);
+  await insTestBook(RECENT, '测试近期系列甲', dayStr(179), 1, 999999);
+  await insTestBook(MIDDLE, '测试中间系列丁', dayStr(-10), 5, 500);
+  await insTestBook(OLDHOT, '测试经典系列乙', '', 999999, 1);
+  await insTestBook(DIRTY, '测试脏日期系列丙', '2099-01-01', 999998, 2);
+
+  const out = await queryLibrary({ category: 'manga', sort: 'trends', keyword: '测试', limit: 10 });
+  assert.deepEqual(out.data.map(x => x.id), [RECENT, MIDDLE, OLDHOT, DIRTY]);
+  assert.equal(out.data[0].latest_date, dayStr(179), '接口要带出最新一卷日期');
+  assert.equal(out.data[2].latest_date, '', '未探明的最新日期为空，前端按首卷日展示');
+
+  // 其它排序不受影响：rank 仍按排名、rating 仍按评分
+  const byRank = await queryLibrary({ category: 'manga', sort: 'rank', keyword: '测试', limit: 10 });
+  assert.equal(byRank.data[0].id, OLDHOT);
+  const byRating = await queryLibrary({ category: 'manga', sort: 'rating', keyword: '测试', limit: 10 });
+  assert.equal(byRating.data[0].id, OLDHOT);
+});
+
+after(async () => {
+  await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [T_ID_BASE]);
 });
