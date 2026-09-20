@@ -25,6 +25,19 @@ const REGION_TAGS = ['日本', '中国', '韩国', '台湾', '香港', '美国',
 const CATEGORY_PLATFORM = { manga: '漫画', lightnovel: '轻小说' };
 const CATEGORY_SQL = { manga: "category = 'manga'", lightnovel: "category = 'lightnovel'", galgame: "category = 'galgame'" };
 
+// ---- 关联搜索（关键词也匹配标签）----
+// 标签子串匹配所需的最短关键词长度：库里近半标签只有 1~2 字，单字做模糊匹配会命中一大片无关作品
+const TAG_SUBSTR_MIN = 2;
+
+// 标签是否算命中关键词。规则必须与 queryLibrary 里 SQL 的命中条件保持一致
+// （整标签命中，或关键词 ≥ TAG_SUBSTR_MIN 字时的子串命中），否则「命中标签」的解释会和筛选出来的结果对不上
+function tagHitsKeyword(tag, kw) {
+  const a = String(tag).toLowerCase();
+  const b = String(kw).toLowerCase();
+  if (a === b) return true;
+  return b.length >= TAG_SUBSTR_MIN && a.includes(b);
+}
+
 let syncing = false;
 let lastSync = null; // { ok, at, counts }
 let latestBackfilled = false; // 进程内只做一遍「最新一卷 / 最新发售日」回填（纯本地，零外部请求）
@@ -725,33 +738,57 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   // page=1.5 会算出小数 OFFSET，SQLite 直接抛 datatype mismatch（500）
   const lim = clampInt(limit, 24, 1, 100);
   const pg = clampInt(page, 1, 1, MAX_PAGE);
-  const where = [CATEGORY_SQL[category], 'blocked = 0'];
-  const params = [];
-  const kw = strParam(keyword).trim();
-  if (kw) {
-    where.push('(name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ')');
-    const like = '%' + escapeLike(kw) + '%';
-    params.push(like, like);
-  }
+  // 先拼「与关键词无关」的条件（分类/标签/年份/地区）。关键词单独放，是因为标签关联搜索要再单独算一次
+  // 「标题命中数」，好让接口能说清「共 N 部，其中 M 部是标签关联出来的」—— 搜索范围悄悄变宽又不交代，
+  // 用户只会觉得结果变水了。
+  const base = [CATEGORY_SQL[category], 'blocked = 0'];
+  const baseParams = [];
   if (tag) {
-    where.push('tags LIKE ? ' + LIKE_ESC);
-    params.push('%' + escapeLike('"' + tag + '"') + '%');
+    base.push('tags LIKE ? ' + LIKE_ESC);
+    baseParams.push('%' + escapeLike('"' + tag + '"') + '%');
   }
   if (/^\d{4}$/.test(year)) {
-    where.push("substr(air_date, 1, 4) = ?");
-    params.push(year);
+    base.push("substr(air_date, 1, 4) = ?");
+    baseParams.push(year);
   }
   if (region) {
     if (region === '未标注') {
-      where.push("regions = '[]'");
+      base.push("regions = '[]'");
     } else {
-      where.push('regions LIKE ? ' + LIKE_ESC);
-      params.push('%' + escapeLike('"' + region + '"') + '%');
+      base.push('regions LIKE ? ' + LIKE_ESC);
+      baseParams.push('%' + escapeLike('"' + region + '"') + '%');
     }
+  }
+  // ---- 关联搜索：关键词同时匹配「标题」与「标签」----
+  // 库里 tags 存着作者/出版社/杂志/题材（野村美月、藤本タツキ、周刊少年JUMP…），只搜标题时这些关系是死的：
+  // 实测搜「野村美月」标题命中 0 条，而轻小说分类下她有 35 部（漫画分类下标注她为作者的 3 部） —— 这才是「想找作者却只能搜书名」的窟窿。
+  const kw = strParam(keyword).trim();
+  const like = kw ? '%' + escapeLike(kw) + '%' : '';
+  const tagWholeLike = kw ? '%"' + escapeLike(kw) + '"%' : '';
+  // 单字关键词禁止标签子串匹配：库里 61969 个标签有 26304 个只有 1~2 字，
+  // 「分」「人」这类单字模糊匹配会拖出几百条毫不相关的作品，单字只留「整标签等于它」这种精确命中。
+  const tagLike = kw.length >= TAG_SUBSTR_MIN ? like : tagWholeLike;
+  const kwLower = kw.toLowerCase(); // 下面判断「书名自己是否命中」用，与 SQL 的 LIKE 保持一样的大小写不敏感
+  const where = base.slice();
+  const params = baseParams.slice();
+  if (kw) {
+    where.push('(name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC +
+      ' OR tags LIKE ? ' + LIKE_ESC + ')');
+    params.push(like, like, tagLike);
   }
   const whereSql = where.join(' AND ');
   const [totalRows] = await pool.query(`SELECT COUNT(*) AS n FROM library_subjects WHERE ${whereSql}`, params);
   const total = totalRows[0].n;
+  // 标题命中数（不含标签关联）：只在有关键词时多查一次，两千多条的全表扫描是毫秒级
+  let titleMatches = total;
+  if (kw) {
+    const [tm] = await pool.query(
+      `SELECT COUNT(*) AS n FROM library_subjects WHERE ${base.join(' AND ')}` +
+      ` AND (name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC})`,
+      [...baseParams, like, like]
+    );
+    titleMatches = tm[0].n;
+  }
   const lastPage = Math.max(1, Math.ceil(total / lim));
   const safePage = Math.min(pg, lastPage);
   const offset = (safePage - 1) * lim;
@@ -762,24 +799,46 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   // 否则一条 2099 年的错日期会永远占着头名。其余按热度兜底 —— 9 千多条老书按首卷日期排会压成「老作品展」。
   const effDate = "COALESCE(NULLIF(latest_date, ''), air_date)";
   const isRecent = `(${effDate} >= date('now', '-365 day') AND ${effDate} <= date('now', '+180 day'))`;
-  const order = sort === 'title' ? 'ORDER BY name_cn ASC, name ASC'
-    : sort === 'rating' ? 'ORDER BY rating_score DESC, rating_total DESC'
+  // 命中等级：0 标题全等 > 1 标题前缀 > 2 标题包含 > 3 整标签 > 4 标签包含。
+  // 有关键词时它永远压在用户选的排序前面 —— 搜「恋爱」实测漫画分类下标题命中 9 部、剩下的 329 部是标签关联，
+  // 不把标题命中拎到前面的话，第一页会被「碰巧被打过恋爱标签」的作品淹没，书名真叫恋爱的反而翻不到。
+  // 排序里的 ? 在 SQL 文本中位于 WHERE 之后、LIMIT 之前，所以绑定顺序是 params -> orderParams -> lim/offset。
+  let relevanceKeys = '';
+  const orderParams = [];
+  if (kw) {
+    const kwPrefix = escapeLike(kw) + '%';
+    relevanceKeys =
+      'CASE WHEN name = ? COLLATE NOCASE OR name_cn = ? COLLATE NOCASE THEN 0' +
+      ` WHEN name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC} THEN 1` +
+      ` WHEN name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC} THEN 2` +
+      ` WHEN tags LIKE ? ${LIKE_ESC} THEN 3 ELSE 4 END, `;
+    orderParams.push(kw, kw, kwPrefix, kwPrefix, like, like, tagWholeLike);
+  }
+  // 没有关键词时 relevanceKeys 是空串，浏览列表拼出来的 SQL 与加这个功能之前逐字节一致
+  const orderKeys = sort === 'title' ? 'name_cn ASC, name ASC'
+    : sort === 'rating' ? 'rating_score DESC, rating_total DESC'
     : sort === 'trends'
-      ? `ORDER BY CASE WHEN ${isRecent} THEN 0 ELSE 1 END,` +
+      ? `CASE WHEN ${isRecent} THEN 0 ELSE 1 END,` +
         ` CASE WHEN ${isRecent} THEN ${effDate} ELSE NULL END DESC,` +
         ` rating_total DESC, ${effDate} DESC, rank ASC`
-      : 'ORDER BY rank ASC, rating_score DESC';
+      : 'rank ASC, rating_score DESC';
+  const order = 'ORDER BY ' + relevanceKeys + orderKeys;
   const [rows] = await pool.query(
     `SELECT subject_id AS id, category, name, name_cn, image, air_date,
             rating_score, rating_total, rank, platform, tags, regions, latest_date
      FROM library_subjects WHERE ${whereSql} ${order} LIMIT ? OFFSET ?`,
-    [...params, lim, offset]
+    [...params, ...orderParams, lim, offset]
   );
   const list = rows.map(r => {
     let tags = [], regions = [];
     try { tags = JSON.parse(r.tags || '[]'); } catch (e) {}
     try { regions = JSON.parse(r.regions || '[]'); } catch (e) {}
     const imgs = r.image ? { common: r.image, medium: r.image, large: r.image, grid: r.image, small: r.image } : undefined;
+    // 「这条为什么会出现」：只在书名本身没命中时才带出标签 —— 书名命中的条目本来就排在前面，
+    // 再给它挂一堆「碰巧也含这个词」的标签，只会让人看不懂排序依据（搜「恋爱」时几乎每条都有恋爱标签）。
+    const titleHit = kw !== '' &&
+      (String(r.name || '').toLowerCase().includes(kwLower) || String(r.name_cn || '').toLowerCase().includes(kwLower));
+    const matchedTags = kw && !titleHit ? tags.filter(t => tagHitsKeyword(t, kw)).slice(0, 3) : [];
     return {
       id: r.id,
       // 游戏分类按 Bangumi 类型 4 输出，详情页/卡片才能正确显示「游戏」
@@ -795,10 +854,12 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
       rank: r.rank || undefined,
       platform: r.platform,
       tags,
-      regions
+      regions,
+      // 命中的标签（关联搜索的解释依据）：空数组表示这条不是靠标签关联进来的
+      matched_tags: matchedTags
     };
   });
-  return { data: list, total, page: safePage, limit: lim, totalPages: lastPage, source: 'local' };
+  return { data: list, total, titleMatches, page: safePage, limit: lim, totalPages: lastPage, source: 'local' };
 }
 
 // 启动定时：进程启动后延时 5s 同步一次（不阻塞启动），之后每 12 小时一次

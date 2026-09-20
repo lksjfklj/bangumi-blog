@@ -10,15 +10,24 @@ const props = defineProps({
   calendar: { type: Boolean, default: false },
   // 放送进度：pct 0-100（null 时不显示进度线），text 形如「第 80/100 话」
   progressPct: { type: Number, default: null },
-  progressText: { type: String, default: '' }
+  progressText: { type: String, default: '' },
+  // 关联搜索的命中说明：后端在「书名没命中、靠标签命中」时给出命中的标签
+  //（见 backend/src/library.js 的 queryLibrary），这里把它们高亮并排到最前面
+  matchedTags: { type: Array, default: () => [] },
+  // 点标签跳去哪：默认收藏页；番剧库传空串，改由父级监听 tag-click 就地按标签筛选
+  tagTarget: { type: String, default: '/collection' }
 });
-const allTags = computed(() => {
+const emit = defineEmits(['tag-click']);
+// 命中标签排最前：它可能落在原标签列表 5 个之外，不提前就会被 slice 截掉，
+//「这条为什么会出现」的解释也就跟着没了
+const shownTags = computed(() => {
+  const hit = props.matchedTags;
   const seen = new Set();
   const out = [];
-  for (const t of [...props.tags, ...props.subjectTags]) {
+  for (const t of [...hit, ...props.tags, ...props.subjectTags]) {
     if (!t || seen.has(t)) continue;
     seen.add(t);
-    out.push(t);
+    out.push({ text: t, hit: hit.includes(t) });
   }
   return out.slice(0, 5);
 });
@@ -59,7 +68,8 @@ const typeLabel = computed(() => {
 function goTag(t, e) {
   e.preventDefault();
   e.stopPropagation();
-  router.push({ path: '/collection', query: { tag: t } });
+  emit('tag-click', t);
+  if (props.tagTarget) router.push({ path: props.tagTarget, query: { tag: t } });
 }
 </script>
 
@@ -76,8 +86,12 @@ function goTag(t, e) {
     <div class="info">
       <div class="title" :title="subject.name">{{ name }}</div>
       <div class="sub">{{ sub }}</div>
-      <div v-if="allTags.length" class="card-tags">
-        <span v-for="t in allTags" :key="t" class="tag" :title="'筛选标签：' + t" @click="goTag(t, $event)">{{ t }}</span>
+      <div v-if="shownTags.length" class="card-tags">
+        <span
+          v-for="t in shownTags" :key="t.text" class="tag" :class="{ hit: t.hit }"
+          :title="t.hit ? '关键词命中的标签 · 点它看同类作品：' + t.text : '筛选标签：' + t.text"
+          @click="goTag(t.text, $event)"
+        >{{ t.text }}</span>
       </div>
     </div>
   </router-link>
@@ -89,6 +103,8 @@ a.subject-card { text-decoration: none; color: inherit; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .card-tags .tag { font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 999px; background: var(--src-tag-bg); color: var(--src-tag-text); border: 1px solid var(--src-tag-border); }
 .card-tags .tag:hover { background: var(--accent); border-color: var(--accent); color: var(--grad-text); transform: translateY(-1px); }
+/* 关键词命中的标签：金色描边标出来，让人一眼看出这条结果是靠哪个标签关联出来的 */
+.card-tags .tag.hit { font-weight: 700; background: var(--tag-gold-bg); color: var(--tag-gold-text); border-color: var(--tag-gold-border); }
 /* 封面内放送进度：左下角话数徽章（评分在右下角，左右对称、不遮挡标题） */
 .cover .watch-progress {
   position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 64px);

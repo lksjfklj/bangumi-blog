@@ -5,7 +5,7 @@
 // 用户以为按年份筛过了，实际看到的还是全库榜单。这里把规则钉死。
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey } = require('../src/browserplan');
+const { buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey, safeTag } = require('../src/browserplan');
 
 test('无筛选：走全库榜单，缓存键与旧格式保持兼容', () => {
   const plan = buildBrowserPlan({ sort: 'trends' });
@@ -74,6 +74,45 @@ test('季度标签：0 填充的月份也要归一成「7月」而不是「07月
   assert.equal(buildBrowserPlan({ airtime: '2026-07' }).tag, '2026年7月');
   assert.equal(buildBrowserPlan({ airtime: '2026-7' }).tag, '2026年7月');
   assert.equal(buildBrowserPlan({ airtime: '2026-12' }).tag, '2026年12月');
+});
+
+// safeTag：筛选词校验。旧实现是路由里的窄字符白名单（中日汉字/字母数字/空格/-/_/·/+，限 20 字），
+// 实测本地库 9571 个标签里有 1641 个（17%）过不了，会被静默丢成「不过滤」——
+// 卡片标签点进来变成全库列表，用户看到的就是「点了没反应」。
+test('safeTag: 放行真实标签里出现过的片假名/长符号/破折号/书名号，不再静默丢弃', () => {
+  for (const t of ['週刊少年ジャンプ', 'コミックス', 'ガガガ文庫', '葵せきな', '大場つぐみ',
+    '轻小说（单行本）', '★マンガ', '7.5', '小说—分卷', '【系列】', '『漫画』', '¬', '科幻']) {
+    assert.equal(safeTag(t), t, t);
+  }
+  // 0 填充季节标签这类会进 URL 的值同样要放行
+  assert.equal(safeTag('2026年7月'), '2026年7月');
+});
+
+test('safeTag: 控制字符一律拒绝，超长截断为空，首尾空白去掉', () => {
+  assert.equal(safeTag(''), '');
+  assert.equal(safeTag(null), '');
+  assert.equal(safeTag(undefined), '');
+  assert.equal(safeTag('   '), '');
+  assert.equal(safeTag('  科幻  '), '科幻');
+  // 换行/回车/Tab/空字节：拼进 bgm 抓取路径或日志都会出事，直接判非法
+  for (const bad of ['科\n幻', '科\r幻', '科\t幻', '科幻\u0000', '科\u0007幻', '科幻\u009b']) {
+    assert.equal(safeTag(bad), '', JSON.stringify(bad));
+  }
+  // 限长 40 字（按码点算，不能让 emoji/代理对把长度算成两倍）；库里最长标签 30 字
+  assert.equal(safeTag('あ'.repeat(40)), 'あ'.repeat(40));
+  assert.equal(safeTag('あ'.repeat(41)), '');
+  assert.equal(safeTag('🈚'.repeat(40)), '🈚'.repeat(40));
+  assert.equal(safeTag('🈚'.repeat(41)), '');
+});
+
+test('safeTag: 危险字符交给 encodeURIComponent 兜底，不靠白名单拦', () => {
+  // 斜杠/问号/井号不能原样进路径，但 encodeURIComponent 会转义，因此 safeTag 放行、路径仍然安全
+  const plan = buildBrowserPlan({ sort: 'trends', tag: safeTag('../a?b#c') });
+  const url = browserListPath(plan, 1);
+  assert.doesNotMatch(url, /\?sort=trends&page=1&/);      // 没有多出来的参数
+  assert.equal(url, '/anime/tag/..%2Fa%3Fb%23c?sort=trends&page=1');
+  // 缓存键按原值区分，不会和别的筛选串数据
+  assert.equal(browserCacheKey(plan, 1), 'bgm:browser:trends:../a?b#c:-:1');
 });
 
 test('末页探测缓存键按筛选条件区分，页面缓存键按排序区分', () => {

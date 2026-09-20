@@ -16,6 +16,20 @@
 const BROWSER_SORTS = ['rank', 'trends', 'title'];
 const DEFAULT_SORT = 'trends';
 
+// 标签/筛选词参数校验。旧实现是路由里一个很窄的字符白名单（只放行中日汉字/字母数字/空格/-/_/·/+，且限 20 字），
+// 实测本地库 9571 个标签里有 1641 个（17%）会被判非法并静默丢弃：片假名杂志名「週刊少年ジャンプ」
+// 「コミックス」「ガガガ文庫」、作者名「葵せきな」「大場つぐみ」，还有「轻小说（单行本）」「★マンガ」
+// 「7.5」。卡片标签现在可以点了，这些标签点进来会变成「筛选没生效、还是全库」，看起来就是点了没反应。
+// 改成「只拒绝控制字符 + 限长」：标签要么走 SQL 占位符（本地库查询），要么被 encodeURIComponent 拼进
+// bgm 抓取路径（见下面的 browserListPath），两条路都不构成注入面，没必要靠字符白名单兜底。
+const TAG_MAX_CHARS = 40; // 实测库里最长标签 30 字（Bangumi 上的短评式标签），留点余量
+function safeTag(v) {
+  const t = String(v || '').trim();
+  if (!t || [...t].length > TAG_MAX_CHARS) return '';
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(t)) return ''; // 控制字符（含换行/Tab）一律拒绝
+  return t;
+}
+
 // 季度 2026-7 -> 标签「2026年7月」；格式不合法返回空串（由调用方保证已校验）
 function seasonTag(airtime) {
   const m = /^(\d{4})-(\d{1,2})$/.exec(String(airtime || ''));
@@ -59,4 +73,4 @@ function browserEndCacheKey(plan) {
   return 'bgm:browser:end:' + (plan.tag || '-') + ':' + (plan.period || '-');
 }
 
-module.exports = { BROWSER_SORTS, DEFAULT_SORT, buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey };
+module.exports = { BROWSER_SORTS, DEFAULT_SORT, buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey, safeTag };

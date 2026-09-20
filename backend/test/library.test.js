@@ -149,6 +149,88 @@ test('queryLibrary sort=trends: 有新卷的压过老经典，脏未来日期不
   assert.equal(byRating.data[0].id, OLDHOT);
 });
 
+// ---------- 关联搜索：关键词同时匹配「标题」与「标签」 ----------
+// 场景：想找某个作者的书，但作者名只存在于 tags 里（书名里没有），旧逻辑直接返回 0 条。
+// 这里全部用假 ID 段 + 假关键词，跟真实库数据隔离（即使开发库里也有同名条目，断言只看自己的 ID）。
+const T_ASSOC_BASE = 900500001;
+const KW = 'zetaqtest';
+const insTaggedBook = (id, name, tagsJson, rank) => pool.query(
+  `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, latest_date, blocked, updated_at)
+   VALUES (?, 'manga', ?, ?, '', '1990-11-26', 8, 1, ?, '漫画', ?, '["日本"]', '', 0, ?)
+   ON CONFLICT(subject_id, category) DO UPDATE SET name = excluded.name, name_cn = excluded.name_cn, tags = excluded.tags,
+     rank = excluded.rank, blocked = 0, updated_at = excluded.updated_at`,
+  [id, name, name, rank, tagsJson, Date.now()]);
+const clearAssoc = () => pool.query('DELETE FROM library_subjects WHERE subject_id BETWEEN ? AND ?', [T_ASSOC_BASE, T_ASSOC_BASE + 99]);
+
+test('queryLibrary 关联搜索: 标题命中排在标签命中前，顺序为「全等 > 前缀 > 包含 > 整标签 > 标签包含」', async () => {
+  await clearAssoc();
+  const EXACT = T_ASSOC_BASE + 1;    // 标题全等
+  const PREFIX = T_ASSOC_BASE + 2;   // 标题前缀
+  const INNAME = T_ASSOC_BASE + 3;   // 标题包含（非前缀）
+  const WHOLETAG = T_ASSOC_BASE + 4; // 书名无关，整标签命中
+  const SUBTAG = T_ASSOC_BASE + 5;   // 书名无关，标签子串命中
+  // 故意乱序插入 + 把 rank 反过来给，确保排序真的是靠命中等级、不是靠 id/rank 巧合
+  await insTaggedBook(SUBTAG, '完全无关的书名丙', '["' + KW + '作者"]', 1);
+  await insTaggedBook(WHOLETAG, '完全无关的书名乙', '["' + KW + '"]', 2);
+  await insTaggedBook(INNAME, '中缀 ' + KW + ' 甲', '[]', 3);
+  await insTaggedBook(PREFIX, KW + ' 前缀甲', '[]', 4);
+  await insTaggedBook(EXACT, KW, '[]', 5);
+
+  const out = await queryLibrary({ category: 'manga', keyword: KW, sort: 'rank', limit: 20 });
+  assert.deepEqual(out.data.map(x => x.id), [EXACT, PREFIX, INNAME, WHOLETAG, SUBTAG]);
+  assert.equal(out.total, 5, '标签关联的条目要计入 total');
+  assert.equal(out.titleMatches, 3, 'titleMatches 只数书名命中的 3 条');
+  assert.equal(out.data[0].titleMatches, undefined, 'titleMatches 是整体字段，不重复塞进每条');
+
+  // 「这条为什么会出现」：书名自己命中的不该再挂 matched_tags，靠标签进来的必须挂上
+  assert.deepEqual(out.data[0].matched_tags, []);
+  assert.deepEqual(out.data[1].matched_tags, []);
+  assert.deepEqual(out.data[2].matched_tags, []);
+  assert.deepEqual(out.data[3].matched_tags, [KW]);
+  assert.deepEqual(out.data[4].matched_tags, [KW + '作者']);
+
+  // 切换排序：命中等级永远压在最前，用户选的排序只在其内部生效
+  for (const sort of ['trends', 'rating', 'title']) {
+    const o = await queryLibrary({ category: 'manga', keyword: KW, sort, limit: 20 });
+    assert.deepEqual(o.data.map(x => x.id), [EXACT, PREFIX, INNAME, WHOLETAG, SUBTAG], 'sort=' + sort + ' 也应保持命中等级');
+  }
+
+  // 无关键词时是纯浏览：titleMatches 退化成 total，SQL 与加这个功能之前一致
+  const browse = await queryLibrary({ category: 'manga', limit: 3 });
+  assert.equal(browse.titleMatches, browse.total);
+});
+
+test('queryLibrary 关联搜索: 单字关键词只认「整标签」子串，不退化成标签内包含（防结果灌水）', async () => {
+  await clearAssoc();
+  const TAGSUB = T_ASSOC_BASE + 11;  // tags 里只有「ζ关联」，不该被单字 ζ 捞出来
+  const TAGWHOLE = T_ASSOC_BASE + 12; // 整个标签就是 ζ，算命中
+  const TITLEHIT = T_ASSOC_BASE + 13; // 书名带 ζ，单字也该照常命中书名
+  await insTaggedBook(TAGSUB, '单字测试书甲', '["ζ关联"]', 1);
+  await insTaggedBook(TAGWHOLE, '单字测试书乙', '["ζ"]', 2);
+  await insTaggedBook(TITLEHIT, 'ζ 标题命中丙', '[]', 3);
+
+  const out = await queryLibrary({ category: 'manga', keyword: 'ζ', limit: 20 });
+  const ids = out.data.map(x => x.id);
+  assert.ok(ids.includes(TAGWHOLE), '整标签等于关键词要命中');
+  assert.ok(ids.includes(TITLEHIT), '单字关键词仍然照常搜书名');
+  assert.ok(!ids.includes(TAGSUB), '单字不许做标签子串匹配，否则「分」「人」会拖出几百条无关作品');
+  assert.equal(out.titleMatches, 1);
+  assert.equal(out.total, 2);
+  assert.deepEqual(out.data.find(x => x.id === TAGWHOLE).matched_tags, ['ζ']);
+  assert.deepEqual(out.data.find(x => x.id === TITLEHIT).matched_tags, []);
+});
+
+test('queryLibrary 关联搜索: LIKE 通配符/引号等特殊字符不报错、不越权匹配', async () => {
+  // 用户（或爬虫）在搜索框里敲 % _ \ " ' 这类字符时，不能被当成通配符逃逸出去
+  for (const kw of ['100%', 'a_b', '\\', '"', "'", '%', '_', '%%', '[]', 'ζ%']) {
+    const out = await queryLibrary({ category: 'manga', keyword: kw, limit: 5 });
+    assert.ok(Array.isArray(out.data), 'keyword=' + JSON.stringify(kw) + ' 应正常返回');
+    assert.ok(typeof out.titleMatches === 'number' && out.titleMatches >= 0);
+    assert.ok(out.total >= out.titleMatches);
+  }
+});
+
+
 after(async () => {
   await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [T_ID_BASE]);
 });

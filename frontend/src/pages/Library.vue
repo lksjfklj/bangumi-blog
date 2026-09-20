@@ -19,6 +19,7 @@ const page = ref(1);
 const size = 24;
 const result = ref([]);
 const total = ref(0);
+const titleMatches = ref(0); // 其中书名命中的条数（本地库的关联搜索会单独给出，用来解释多出来的标签关联结果）
 const loading = ref(false);
 const errorMsg = ref('');
 const localMode = ref(false);
@@ -139,6 +140,14 @@ const TAG_OPTIONS = computed(() => {
   if (category.value === 'galgame') return GALGAME_TAG_OPTIONS;
   return isBook.value ? BOOK_TAG_OPTIONS : ANIME_TAG_OPTIONS;
 });
+// 下拉框里要能显示「卡片上点进来的标签」。卡片标签不限于这里的常用标签（作者、文库、杂志名都有），
+// 一旦当前筛选值不在选项里，naive-ui 的下拉框就没有对应项可显示，看起来像筛选没生效。
+const tagSelectOptions = computed(() => {
+  const opts = TAG_OPTIONS.value;
+  const cur = browseTag.value;
+  if (cur && !opts.some(o => o.value === cur)) return [{ label: cur, value: cur }, ...opts];
+  return opts;
+});
 const REGION_OPTIONS = [
   { label: '全部地区', value: '' },
   { label: '日本', value: '日本' },
@@ -182,8 +191,8 @@ const from = computed(() => (page.value - 1) * size + 1);
 const to = computed(() => (page.value - 1) * size + result.value.length);
 
 const HOT = computed(() => {
-  if (category.value === 'manga') return ['海贼王', '进击的巨人', '灌篮高手', '鬼灭之刃', '葬送的芙莉莲'];
-  if (category.value === 'lightnovel') return ['无职转生', '刀剑神域', '关于我转生变成史莱姆这档事', '魔法禁书目录', '凉宫春日的忧郁'];
+  if (category.value === 'manga') return ['海贼王', '进击的巨人', '灌篮高手', '鬼灭之刃', '葬送的芙莉莲', '藤本树'];
+  if (category.value === 'lightnovel') return ['无职转生', '刀剑神域', '关于我转生变成史莱姆这档事', '魔法禁书目录', '凉宫春日的忧郁', '野村美月'];
   if (category.value === 'galgame') return ['CLANNAD', '命运石之门', 'Ever17', '白色相簿2', 'Fate/stay night'];
   return ['进击的巨人', '孤独摇滚', '葬送的芙莉莲', '间谍过家家', '鬼灭之刃'];
 });
@@ -192,6 +201,14 @@ const emptyDescription = computed(() => {
   if (isBook.value) return '没有找到相关内容（本地内容库同步完成后可浏览全部' + catLabel.value + '）';
   if (mode.value === 'search' && keyword.value.trim()) return '🔍 没有找到「' + keyword.value.trim() + '」…换个关键词试试，或点上方热门标签';
   return '没有找到相关内容';
+});
+// 关联搜索提示：关键词顺带命中了标签时说明一下，否则「搜作者名，出来一堆书名里没这个词的书」
+// 会让人以为搜错了或者搜索坏了
+const tagAssocNote = computed(() => {
+  if (!keyword.value.trim()) return '';
+  const extra = total.value - (titleMatches.value || 0);
+  if (extra <= 0) return '';
+  return '· 其中书名命中 ' + titleMatches.value + ' 部，另 ' + extra + ' 部是标签关联（作者 / 文库 / 题材等）';
 });
 
 let loadSeq = 0;
@@ -229,6 +246,7 @@ async function load() {
       loadSeq++; // 作废当前响应
       result.value = d.data || [];
       total.value = d.total || 0;
+      titleMatches.value = typeof d.titleMatches === 'number' ? d.titleMatches : (d.total || 0);
       if (d.source === 'local') localMode.value = true;
       errorMsg.value = '已超出可浏览范围，已自动跳转到最后一页（第 ' + target + ' 页）';
       loading.value = false;
@@ -236,12 +254,14 @@ async function load() {
     }
     result.value = d.data || [];
     total.value = d.total || 0;
+    titleMatches.value = typeof d.titleMatches === 'number' ? d.titleMatches : (d.total || 0);
     if (d.source === 'local') localMode.value = true;
     if (d.error) errorMsg.value = d.error;
   } catch (e) {
     if (seq !== loadSeq) return;
     result.value = [];
     total.value = 0;
+    titleMatches.value = 0;
     errorMsg.value = e.message || '加载失败，请稍后再试';
   }
   if (seq === loadSeq) loading.value = false;
@@ -317,6 +337,17 @@ function onKeywordClear() {
   }
 }
 function hot(k) { keyword.value = k; doSearch(); }
+// 点卡片上的标签 = 就地按这个标签筛选：退出搜索态并清空关键词，看到的是「该标签下的全部作品」，
+// 而不是「搜索词 ∩ 标签」的交集 —— 搜作者名时这两者往往一模一样，等于点了没跳
+function onCardTag(t) {
+  if (!t) return;
+  browseTag.value = t;
+  keyword.value = '';
+  mode.value = 'browse';
+  if (!isBook.value) browseAirtime.value = null; // 番剧：季度独占，留着会被 readQuery 反过来把标签清掉
+  page.value = 1;
+  syncQuery();
+}
 
 async function loadLibStatus() {
   try { libStatus.value = await api.get('/anime/library/status'); } catch (e) { /* ignore */ }
@@ -438,7 +469,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
     <div class="search-bar" v-reveal>
       <n-input
         v-model:value="keyword"
-        :placeholder="isBook ? '搜索' + catLabel + '…（如：' + HOT[0] + '）' : '搜索番剧、书籍、游戏…（如：进击的巨人）'"
+        :placeholder="isBook ? '搜索' + catLabel + '…（书名 / 作者 / 文库 / 题材都能搜）' : '搜索番剧、书籍、游戏…（如：进击的巨人）'"
         size="large" clearable @keyup.enter="doSearch" @clear="onKeywordClear"
       />
       <n-select v-if="mode === 'search' && !isBook" v-model:value="searchType" :options="typeOptions" style="width:110px" @update:value="onTypeChange" />
@@ -453,7 +484,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 
     <div v-if="mode === 'browse' || isBook" class="filter-bar">
       <span class="muted">筛选：</span>
-      <n-select v-model:value="browseTag" :options="TAG_OPTIONS" placeholder="全部标签" clearable style="width:150px" @update:value="onTagChange" />
+      <n-select v-model:value="browseTag" :options="tagSelectOptions" placeholder="全部标签" clearable style="width:150px" @update:value="onTagChange" />
       <n-select v-model:value="browseYear" :options="yearOptions" placeholder="全部年份" clearable style="width:120px" @update:value="onYearChange" />
       <n-select v-if="!isBook" v-model:value="browseAirtime" :options="quarterOptions" placeholder="全部季度" clearable style="width:140px" @update:value="onQuarterChange" />
       <n-select v-if="showRegion" v-model:value="browseRegion" :options="REGION_OPTIONS" clearable style="width:130px" @update:value="onRegionChange" />
@@ -524,6 +555,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
           （共 {{ total }} 部动画，第 {{ from }}-{{ to }} 条）
         </span>
         <span v-else>共 {{ total }} 条结果<template v-if="result.length">（第 {{ from }}-{{ to }} 条）</template></span>
+        <span v-if="tagAssocNote" class="assoc-note">{{ tagAssocNote }}</span>
         <span v-if="localMode && isBook" class="local-note">· 数据来自 Bangumi 本地同步库</span>
         <span v-if="localMode && !isBook" class="local-note">· Bangumi 在线不可用，已显示本地已导入番剧</span>
       </template>
@@ -532,7 +564,13 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 
     <n-spin :show="loading">
       <div v-if="result.length" class="card-grid" v-reveal>
-        <SubjectCard v-for="s in result" :key="category + '-' + s.id" :subject="s" />
+        <!-- 关联搜索：卡片带上标签（命中的高亮并置顶）；tag-target="" 关掉「跳收藏页」的默认行为，
+             改由 onCardTag 就地按该标签筛选 -->
+        <SubjectCard
+          v-for="s in result" :key="category + '-' + s.id" :subject="s"
+          :tags="s.tags || []" :matched-tags="s.matched_tags || []" tag-target=""
+          @tag-click="onCardTag"
+        />
       </div>
       <n-empty v-else-if="!loading && !errorMsg" :description="emptyDescription" style="padding:60px 0" />
     </n-spin>
@@ -560,6 +598,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 .filter-hint { font-size: 12px; opacity: .7; }
 .result-info { margin: 16px 0 14px; font-size: 13px; color: var(--text-dim); }
 .local-note { color: #e6a23c; }
+.assoc-note { color: var(--tag-gold-text); }
 .sync-note { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; font-size: 12px; color: var(--ep-done-text); }
 .sync-note.syncing { color: var(--accent); }
 .sync-btn {

@@ -7,7 +7,7 @@ const releasecal = require('../releasecal');
 const bookrelease = require('../bookrelease');
 const { pool } = require('../db');
 const { strParam, clampInt, MAX_PAGE } = require('../query');
-const { buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey } = require('../browserplan');
+const { buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey, safeTag } = require('../browserplan');
 const router = express.Router();
 
 const SUBJECT_TYPES = { 1: 'book', 2: 'anime', 3: 'music', 4: 'game', 6: 'real' };
@@ -23,7 +23,6 @@ async function resolveSubjectToken() {
     return await getValidToken(rows[0]);
   } catch (e) { return null; }
 }
-
 
 // 读取本地 galgame 库已回填的 VNDB 摘要（无匹配/未回填/被封禁返回 null），供条目详情页展示增强数据
 async function localVndbExt(subjectId) {
@@ -294,7 +293,7 @@ router.get('/browser', async (req, res, next) => {
       // 书籍排序：默认「近期注目」（本地库按近一年发行 + 热度倒序），支持 trends/rank/title/rating
       const sort = ['trends', 'rank', 'title', 'rating'].includes(req.query.sort) ? req.query.sort : 'trends';
       const keyword = String(req.query.keyword || '').trim().slice(0, 100);
-      const tag = /^[\u4e00-\u9fa5A-Za-z0-9 _\-·+]{1,20}$/.test(String(req.query.tag || '').trim()) ? String(req.query.tag).trim() : '';
+      const tag = safeTag(req.query.tag);
       const year = /^(19\d{2}|20[0-2]\d)$/.test(String(req.query.year || '').trim()) ? String(req.query.year).trim() : '';
       const region = String(req.query.region || '').trim().slice(0, 10);
       const limit = 24;
@@ -307,8 +306,7 @@ router.get('/browser', async (req, res, next) => {
     let page = clampInt(req.query.page, 1, 1, MAX_BROWSER_PAGE);
     const limit = 24; // bgm.tv 榜单每页固定 24 条
     // 筛选参数一律先正则过滤（URL 里什么脏值都可能出现），再交给 browserplan 拼 bgm 的路径
-    const rawTag = String(req.query.tag || '').trim().slice(0, 20);
-    const tag = /^[\u4e00-\u9fa5A-Za-z0-9 _\-·+]{1,20}$/.test(rawTag) ? rawTag : '';
+    const tag = safeTag(req.query.tag);
     const year = /^(19\d{2}|20[0-2]\d)$/.test(String(req.query.year || '').trim()) ? String(req.query.year).trim() : '';
     const airtime = /^(19\d{2}|20[0-2]\d)-(0?[1-9]|1[0-2])$/.test(String(req.query.airtime || '').trim()) ? String(req.query.airtime).trim() : '';
     // 优先级：季度（独占）> 类型标签(+年份) > 单独年份 > 全库，详见 browserplan.js
