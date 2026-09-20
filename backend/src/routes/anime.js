@@ -7,6 +7,7 @@ const releasecal = require('../releasecal');
 const bookrelease = require('../bookrelease');
 const { pool } = require('../db');
 const { strParam, clampInt, MAX_PAGE } = require('../query');
+const { buildBrowserPlan, browserListPath, browserCacheKey, browserEndCacheKey } = require('../browserplan');
 const router = express.Router();
 
 const SUBJECT_TYPES = { 1: 'book', 2: 'anime', 3: 'music', 4: 'game', 6: 'real' };
@@ -165,8 +166,6 @@ router.get('/subjects/:id/related', async (req, res, next) => {
 
 
 // ---------- 番剧库浏览（Bangumi 网页榜单，经代理抓取；失败回退本地已导入番剧） ----------
-const BROWSER_SORTS = ['rank', 'trends', 'title'];
-
 function decodeEntities(s) {
   if (!s) return '';
   return String(s)
@@ -307,34 +306,27 @@ router.get('/browser', async (req, res, next) => {
     const MAX_BROWSER_PAGE = 420;
     let page = clampInt(req.query.page, 1, 1, MAX_BROWSER_PAGE);
     const limit = 24; // bgm.tv 榜单每页固定 24 条
-    const sort = BROWSER_SORTS.includes(req.query.sort) ? req.query.sort : 'trends'; // 默认近期注目
-    // 标签/年份筛选：bgm 网页筛选入口为 /anime/tag/<标签> 与 /anime/tag/<标签>/airtime/<年份>
+    // 筛选参数一律先正则过滤（URL 里什么脏值都可能出现），再交给 browserplan 拼 bgm 的路径
     const rawTag = String(req.query.tag || '').trim().slice(0, 20);
     const tag = /^[\u4e00-\u9fa5A-Za-z0-9 _\-·+]{1,20}$/.test(rawTag) ? rawTag : '';
     const year = /^(19\d{2}|20[0-2]\d)$/.test(String(req.query.year || '').trim()) ? String(req.query.year).trim() : '';
-    // 季度筛选：airtime 形如 2026-7；bgm 的季度浏览页实际是「2026年7月」标签
     const airtime = /^(19\d{2}|20[0-2]\d)-(0?[1-9]|1[0-2])$/.test(String(req.query.airtime || '').trim()) ? String(req.query.airtime).trim() : '';
-    const airtimeTag = airtime ? (airtime.split('-')[0] + '年' + Number(airtime.split('-')[1]) + '月') : '';
-    // 季度与类型标签二选一（bgm 链式标签不会叠加过滤，优先季度）
-    const effTag = airtimeTag || tag;
-    const period = (year && tag) ? year : '';
-    const path = effTag
-      ? (period ? '/anime/tag/' + encodeURIComponent(effTag) + '/airtime/' + period + '?sort=' + sort + '&page='
-              : '/anime/tag/' + encodeURIComponent(effTag) + '?sort=' + sort + '&page=')
-      : '/anime/browser?sort=' + sort + '&page=';
+    // 优先级：季度（独占）> 类型标签(+年份) > 单独年份 > 全库，详见 browserplan.js
+    const plan = buildBrowserPlan({ sort: req.query.sort, tag, year, airtime });
+    const filtered = plan.filtered;
 
-    const fetchPage = (p) => cached('bgm:browser:' + sort + ':' + (effTag || '-') + ':' + (period || '-') + ':' + p, 60 * 60 * 1000, async () => {
-      const html = await bgmWeb(path + p, {
+    const fetchPage = (p) => cached(browserCacheKey(plan, p), 60 * 60 * 1000, async () => {
+      const html = await bgmWeb(browserListPath(plan, p), {
         headers: { Accept: 'text/html,application/xhtml+xml' }
       });
       const parsed = parseBrowserHtml(html);
       if (!parsed.data.length) {
-        // 第 1 页就为空：该标签/年份筛选下没有内容；其他页为空：已超出实际内容范围
-        if (p === 1 && effTag) return { data: [], totalPages: 1 };
+        // 第 1 页就为空：该筛选条件下没有内容；其他页为空：已超出实际内容范围
+        if (p === 1 && filtered) return { data: [], totalPages: 1 };
         throw new Error('browser page empty');
       }
       // 校验：rank 榜非第 1 页却出现 Rank<=24 的条目 = bgm.tv 把越界页重定向回了第 1 页，拒绝该结果
-      if (p > 1 && sort === 'rank' && parsed.data[0].rank && parsed.data[0].rank <= 24) {
+      if (p > 1 && plan.sort === 'rank' && parsed.data[0].rank && parsed.data[0].rank <= 24) {
         throw new Error('browser page out of range');
       }
       return parsed;
@@ -343,7 +335,7 @@ router.get('/browser', async (req, res, next) => {
     // 标签/年份模式：bgm 分页器上的总页数是按整个标签（全部年份）统计的，
     // 例如 /anime/tag/日常/airtime/2024 显示 4/35，但实际只有前 3 页有内容、第 4 页起为空。
     // 因此用二分探测出真实末页并缓存 1 小时，翻页/跳页时钳制到真实末页，避免空页与虚高的 totalPages。
-    const findTagEnd = () => cached('bgm:browser:end:' + effTag + ':' + (period || '-'), 60 * 60 * 1000, async () => {
+    const findTagEnd = () => cached(browserEndCacheKey(plan), 60 * 60 * 1000, async () => {
       const first = await fetchPage(1);
       if (!first.data.length) return { lastPage: 1 };
       const fakeTotal = Math.min(first.totalPages || MAX_BROWSER_PAGE, MAX_BROWSER_PAGE);
@@ -365,7 +357,7 @@ router.get('/browser', async (req, res, next) => {
 
     let data;
     let totalPages;
-    if (effTag) {
+    if (filtered) {
       // 标签/年份/季度筛选：以真实末页为上限，跳页超界时钳制到真实末页
       const { lastPage } = await findTagEnd();
       page = Math.min(page, lastPage);

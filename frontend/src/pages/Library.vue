@@ -264,6 +264,9 @@ function readQuery() {
   browseTag.value = typeof q.tag === 'string' ? q.tag : null;
   browseYear.value = typeof q.year === 'string' ? q.year : null;
   browseAirtime.value = typeof q.airtime === 'string' ? q.airtime : null;
+  // 手编 URL 里可能同时带 tag/year/airtime；抓取时季度独占（backend/src/browserplan.js），
+  // 这里同步把另外两个清掉，避免下拉框显示的筛选条件与实际列表不一致
+  if (!isBook.value && browseAirtime.value) { browseTag.value = null; browseYear.value = null; }
   browseRegion.value = typeof q.region === 'string' ? q.region : null;
 }
 function syncQuery() {
@@ -295,7 +298,13 @@ function onTagChange() {
   page.value = 1; syncQuery();
 }
 function onYearChange() {
-  if (!isBook.value && browseAirtime.value) browseTag.value = null; // 季度与类型标签互斥：选了季度就清标签
+  // 年份与季度互斥（季度自带年份）：选了年份就清季度；番剧的年份可与类型标签叠加（bgm 支持 标签+年份）
+  if (!isBook.value && browseYear.value) browseAirtime.value = null;
+  page.value = 1; syncQuery();
+}
+function onQuarterChange() {
+  // 季度最具体，独占：选了季度就清掉类型标签与年份，避免拼出必然为空的条件
+  if (!isBook.value && browseAirtime.value) { browseTag.value = null; browseYear.value = null; }
   page.value = 1; syncQuery();
 }
 function onRegionChange() { page.value = 1; syncQuery(); }
@@ -445,10 +454,10 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
     <div v-if="mode === 'browse' || isBook" class="filter-bar">
       <span class="muted">筛选：</span>
       <n-select v-model:value="browseTag" :options="TAG_OPTIONS" placeholder="全部标签" clearable style="width:150px" @update:value="onTagChange" />
-      <n-select v-if="!isBook" v-model:value="browseAirtime" :options="quarterOptions" placeholder="全部季度" clearable style="width:140px" @update:value="onYearChange" />
-      <n-select v-else v-model:value="browseYear" :options="yearOptions" placeholder="全部年份" clearable style="width:120px" @update:value="onYearChange" />
+      <n-select v-model:value="browseYear" :options="yearOptions" placeholder="全部年份" clearable style="width:120px" @update:value="onYearChange" />
+      <n-select v-if="!isBook" v-model:value="browseAirtime" :options="quarterOptions" placeholder="全部季度" clearable style="width:140px" @update:value="onQuarterChange" />
       <n-select v-if="showRegion" v-model:value="browseRegion" :options="REGION_OPTIONS" clearable style="width:130px" @update:value="onRegionChange" />
-      <span v-if="!isBook" class="muted filter-hint">季度按放送月份筛选（如 2026年7月番）；季度与类型标签二选一</span>
+      <span v-if="!isBook" class="muted filter-hint">年份按放送年份筛选（可与类型标签叠加）；季度按放送月份筛选（如 2026年7月番），选了季度会清空年份与标签</span>
       <span v-if="showRegion" class="muted filter-hint">地区按 Bangumi 用户标签判定，未标注的默认保留</span>
     </div>
 
