@@ -174,6 +174,16 @@ async function insLib(id, name, nameCn, airDate, latest) {
        latest_date = excluded.latest_date, updated_at = excluded.updated_at`,
     [id, name, nameCn, airDate, latest, Date.now()]);
 }
+// 带分类的库内条目写入（跨分类隔离测试用：同名同系列分别收在 manga / lightnovel）
+async function insLibCat(id, category, name, nameCn, airDate, latest) {
+  await pool.query(
+    `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, latest_date, blocked, updated_at)
+     VALUES (?, ?, ?, ?, '', ?, 7.5, 10, 0, '书籍', '[]', '[]', ?, 0, ?)
+     ON CONFLICT(subject_id, category) DO UPDATE SET
+       name = excluded.name, name_cn = excluded.name_cn, air_date = excluded.air_date,
+       latest_date = excluded.latest_date, updated_at = excluded.updated_at`,
+    [id, category, name, nameCn, airDate, latest, Date.now()]);
+}
 async function insCal(id, category, name, nameCn, date) {
   await pool.query(
     `INSERT INTO bgm_book_release_calendar (subject_id, category, name, name_cn, image, date, platform, rating_score, rating_total, rank, meta_tags, created_at, updated_at)
@@ -219,4 +229,57 @@ test('syncLatestDates: 系列名（原名/中文名）与 id 直连两路命中�
   const st = await bookrelease.getStatus();
   assert.ok(st.latestRefresh && st.latestRefresh.at);
   assert.ok(st.latestRefresh.library >= 3);
+});
+
+// ---------- 分类隔离 / 历史污染纠错 ----------
+// 回归：bgm 里同一系列常常漫画/小说双栖（安達としまむら、お隣の天使様…），系列名归一化后是同一个键。
+// 老实现 byKey 不按 category 分桶，漫画日历行的发售日会被写进同名轻小说条目（线上实测 150+ 条）。
+const X_ID = LATEST_ID_BASE + 200;    // 轻小说侧
+const X_MANGA = LATEST_ID_BASE + 201; // 漫画侧
+const C_LN = LATEST_ID_BASE + 210;    // 被跨分类污染、同分类有真值
+const C_LN2 = LATEST_ID_BASE + 211;   // 被跨分类污染、同分类无真值
+
+test('syncLatestDates: 漫画日历行不会写进同名轻小说条目（分类隔离）', async () => {
+  await pool.query('DELETE FROM library_subjects WHERE subject_id IN (?, ?, ?)', [X_ID, X_MANGA, C_LN]);
+  await insLibCat(X_ID, 'lightnovel', 'クロス分類テスト', '跨分类隔离测试', '1990-01-01', '');
+  await insLibCat(X_MANGA, 'manga', 'クロス分類テスト', '跨分类隔离测试', '1990-01-01', '');
+  const d = addDays(today, 20);
+  await insCal(LATEST_ID_BASE + 220, 'manga', 'クロス分類テスト (7)', '', d);
+
+  const res = await bookrelease.syncLatestDates();
+  assert.equal(res.ok, true);
+  const latest = (id) => q('SELECT latest_date FROM library_subjects WHERE subject_id = ?', [id])[0].latest_date;
+  assert.equal(latest(X_MANGA), d, '同分类（漫画）条目应被回写');
+  assert.ok(!latest(X_ID), '异分类（轻小说）条目不许被写');
+
+  // 反向：轻小说日历行也只写轻小说，不写漫画
+  const d2 = addDays(today, 25);
+  await insCal(LATEST_ID_BASE + 221, 'lightnovel', 'クロス分類テスト (3)', '', d2);
+  await bookrelease.syncLatestDates();
+  assert.equal(latest(X_ID), d2, '轻小说日历行应回写轻小说条目');
+  assert.equal(latest(X_MANGA), d, '漫画条目不该被轻小说行改写');
+});
+
+test('syncLatestDates: 历史跨分类污染会被纠正（同分类有真值则改写，否则清空）', async () => {
+  await pool.query('DELETE FROM library_subjects WHERE subject_id IN (?, ?)', [C_LN, C_LN2]);
+  const crossDay = addDays(today, 30);
+  const rightDay = addDays(today, -10);
+  const crossDay2 = addDays(today, 40);
+  // C_LN：现值 = 漫画日历行的日期（跨分类污染），同分类日历有更早的真值 -> 应纠正成真值
+  await insLibCat(C_LN, 'lightnovel', '汚染修正テスト', '污染修正测试', '1990-01-01', crossDay);
+  await insCal(LATEST_ID_BASE + 230, 'manga', '汚染修正テスト (2)', '', crossDay);
+  await insCal(LATEST_ID_BASE + 231, 'lightnovel', '汚染修正テスト (1)', '', rightDay);
+  // C_LN2：现值只能由漫画行解释、同分类一行都没有 -> 应清空（宁可没有日期，也不能显示别的分类的日期）
+  await insLibCat(C_LN2, 'lightnovel', '汚染清空テスト', '污染清空测试', '1990-01-01', crossDay2);
+  await insCal(LATEST_ID_BASE + 232, 'manga', '汚染清空テスト (3)', '', crossDay2);
+
+  const res = await bookrelease.syncLatestDates();
+  assert.equal(res.ok, true);
+  assert.ok(res.corrected >= 2, '应至少纠正两条跨分类污染，实际 ' + res.corrected);
+  const latest = (id) => q('SELECT latest_date FROM library_subjects WHERE subject_id = ?', [id])[0].latest_date;
+  assert.equal(latest(C_LN), rightDay, '同分类有真值时改成真值');
+  assert.ok(!latest(C_LN2), '同分类无真值时清空');
+
+  // 不误伤：日历解释不了的「库里更晚的日期」保持不动（可能是已滑出窗口的旧扫描留下的合法值）
+  assert.equal(latest(S_ID), addDays(today, 300), '窗口外的合理新日期不许被当成污染清掉');
 });

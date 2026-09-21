@@ -337,6 +337,7 @@ async function runSync(options = {}) {
     const mergedCounts = await liveCounts();
     lastSync = { ok: true, at: new Date().toISOString(), counts: mergedCounts };
     await setMeta('status', 'done');
+    await setMeta('last_error', ''); // 成功后清掉历史失败原因，否则库里永远挂着上一次的报错
     await setMeta('last_synced', lastSync.at); // 展示用：最近一次（任意分类）同步时间
     if (doBooks) await setMeta('last_run', lastSync.at);       // 书籍 12h 周期基准
     if (doGames) await setMeta('last_run_games', lastSync.at); // 游戏 7 天周期基准
@@ -692,6 +693,19 @@ async function vndbStatus() {
 async function ensureSync() {
   if (syncing) return;
   try {
+    // 本地回填「最新一卷 / 最新发售日」：书籍（日历窗口探到的系列卷）/ Galgame（VNDB released）。
+    // 纯本地计算、零外部请求，所以放在同步判定之前跑 —— 放后面的话，启动时一旦赶上书籍全量同步
+    // （要跑十几分钟），这一步会被「同步占用中」的提前 return 推到下一轮（12h 后），
+    // 「最新一卷」的脏数据就一直挂在首页上。每进程只跑一次，失败不影响后面的同步判定。
+    if (!latestBackfilled) {
+      latestBackfilled = true;
+      try {
+        const gl = await refreshGalgameLatest();
+        const bk = await bookrelease.syncLatestDates();
+        console.log('[library] 最新日期回填 galgame=' + (gl.updated || 0) + ' books=' + ((bk && bk.updated) || 0)
+          + (bk && bk.corrected ? '（跨分类纠错 ' + bk.corrected + '）' : ''));
+      } catch (e) { console.error('[library] 最新日期回填失败:', e.message); }
+    }
     const [rows] = await pool.query('SELECT COUNT(*) AS n FROM library_subjects');
     const empty = !rows[0].n;
     const last = await getMeta('last_run');
@@ -699,20 +713,15 @@ async function ensureSync() {
     if (empty || stale) {
       await runSync();
     }
-    if (syncing) return; // 书籍同步占用中，游戏交给下一轮/手动
+    // 书籍同步可能刚被本函数启动（或被手动同步占用）。直接 return 会把游戏同步整体推迟一整轮（12h），
+    // 新装/长时间停机后 galgame 库就一直是空的 —— 改成原地等它跑完再判游戏，最多等 60 分钟。
+    for (let i = 0; i < 720 && syncing; i++) await delay(5000);
+    if (syncing) return; // 等了 60 分钟还在同步，下一轮再说
     const [gRows] = await pool.query("SELECT COUNT(*) AS n FROM library_subjects WHERE category = 'galgame'");
     const lastGames = await getMeta('last_run_games');
     const gamesStale = !lastGames || (Date.now() - new Date(lastGames).getTime() > 7 * 24 * 3600 * 1000);
     if (!gRows[0].n || gamesStale) {
       await runSync({ types: [4] });
-    }
-    // 本地回填「最新一卷 / 最新发售日」：书籍（日历窗口探到的系列卷）/ Galgame（VNDB released）。
-    // 升级后老库的 latest_date 全是空的，这里补一遍（每进程一次，之后靠 bookrelease 6h 扫描与 VNDB 回填持续维护）
-    if (!latestBackfilled) {
-      latestBackfilled = true;
-      const gl = await refreshGalgameLatest();
-      const bk = await bookrelease.syncLatestDates();
-      console.log('[library] 最新日期回填 galgame=' + (gl.updated || 0) + ' books=' + ((bk && bk.updated) || 0));
     }
     // 存量 galgame 从未做过 VNDB 回填（老库部署/手工补库后），后台补一轮
     if (!(await getMeta('vndb_last_run'))) kickVndbEnrich();

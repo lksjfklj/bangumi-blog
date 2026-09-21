@@ -169,9 +169,16 @@ async function queryWindow(category, from, to, dir, limit, today) {
 // 拿它排「近期注目」只能排出老经典。日历里每一行都是一次「新卷登载」，把它的日期按「剥掉卷号」后的
 // 系列名匹配回库内条目，就得到该系列最新一卷的发售日（供 library.js 的 trends 排序使用）。
 // 匹配双路：subject_id 直接命中（库里收过这个分卷条目）+ 系列名归一化命中（库里收的是系列主体）。
-// 只增不减（写入时要求比现值更新），所以重扫旧窗口、旧卷补录都不会把已记录的新卷日期冲掉。
+// 分类隔离：漫画日历行只能写进漫画条目、轻小说行只能写进轻小说条目。bgm 里同一系列漫画/小说双栖很常见
+//   （安達としまむら、お隣の天使様…），系列名归一化后两边是同一个键，不按 category 分桶就会把漫画新卷的
+//   发售日写进轻小说条目（反之亦然），前端「最新一卷」显示的就成了另一个分类的日期。
+// 只增不减 + 定向纠错：正常路径要求候选日期比现值更新，重扫旧窗口/旧卷补录都不会冲掉已记录的新卷日期；
+//   但被历史版本写坏的值必须能降下来，否则错误永久留在库里 —— 于是额外识别「现值只能由异分类日历行解释、
+//   同分类一行都支持不了」的条目，按同分类真值改写（同分类没有真值就清空）。
 let latestRefreshing = false;
 let latestLast = null;
+
+const LATEST_CATS = ['manga', 'lightnovel'];
 
 async function syncLatestDates() {
   if (latestRefreshing) return { ok: false, reason: 'already running' };
@@ -182,51 +189,106 @@ async function syncLatestDates() {
       `SELECT subject_id, category, name, name_cn, COALESCE(latest_date, '') AS latest_date
        FROM library_subjects WHERE category IN ('manga', 'lightnovel')`
     );
-    const byId = new Map();
-    const byKey = new Map();
+    const byId = new Map();  // 'subject_id|category' -> 库内行
+    const byKey = new Map(); // 'category|seriesKey' -> [库内行]（按 category 分桶，禁止跨类命中）
     for (const r of libRows || []) {
       byId.set(String(r.subject_id) + '|' + r.category, r);
       for (const k of seriesKeysOf(r.name, r.name_cn)) {
-        const list = byKey.get(k);
+        const mapKey = r.category + '|' + k;
+        const list = byKey.get(mapKey);
         if (list) list.push(r);
-        else byKey.set(k, [r]);
+        else byKey.set(mapKey, [r]);
       }
     }
     const [calRows] = await pool.query(
       'SELECT subject_id, category, name, name_cn, date FROM bgm_book_release_calendar'
     );
-    const pending = new Map(); // 'subject_id|category' -> 待写日期（同一行取最新）
-    const consider = (row, date) => {
+    const sameMax = new Map();    // 'subject_id|category' -> 同分类命中到的最新日期
+    const sameDates = new Map();  // 'subject_id|category' -> Set(同分类命中过的日期)
+    const crossDates = new Map(); // 'subject_id|category' -> Set(异分类命中过的日期，仅作纠错证据)
+    const markDate = (store, key, d) => {
+      const set = store.get(key);
+      if (set) set.add(d);
+      else store.set(key, new Set([d]));
+    };
+    const hit = (row, calCat, d) => {
       if (!row) return;
-      const d = normalizeDate(date);
-      if (!d) return;
-      if (String(row.latest_date || '') >= d) return; // 库里已是更新的日期
       const key = String(row.subject_id) + '|' + row.category;
-      const prev = pending.get(key);
-      if (prev && prev >= d) return;                  // 本轮已有更新的候选
-      pending.set(key, d);
+      if (row.category === calCat) {
+        if (!d) return;
+        const prev = sameMax.get(key);
+        if (!prev || d > prev) sameMax.set(key, d);
+        markDate(sameDates, key, d);
+      } else if (d) {
+        markDate(crossDates, key, d); // 异分类命中不能作为来源，只留证据
+      }
     };
     for (const c of calRows || []) {
-      consider(byId.get(String(c.subject_id) + '|' + c.category), c.date);
-      for (const k of seriesKeysOf(c.name, c.name_cn)) {
-        for (const row of byKey.get(k) || []) consider(row, c.date);
+      const d = normalizeDate(c.date);
+      // subject_id 直连（键自带分类，天然不会跨类）
+      for (const cat of LATEST_CATS) hit(byId.get(String(c.subject_id) + '|' + cat), c.category, d);
+      // 系列名归一化匹配：两个分类都要扫一遍，同分类才写、异分类只记证据
+      const keys = seriesKeysOf(c.name, c.name_cn);
+      for (const cat of LATEST_CATS) {
+        for (const k of keys) {
+          for (const row of byKey.get(cat + '|' + k) || []) hit(row, c.category, d);
+        }
+      }
+    }
+    const pending = new Map(); // 'subject_id|category' -> { date } 递增 / { fix, from } 纠正 / { clear, from }
+    for (const row of libRows || []) {
+      const key = String(row.subject_id) + '|' + row.category;
+      const stored = normalizeDate(row.latest_date);
+      const correct = sameMax.get(key) || '';
+      if (correct && (!stored || stored < correct)) {
+        pending.set(key, { date: correct });
+        continue;
+      }
+      // 现值比同分类真值还新，且同分类没有任何一行支持它、只有异分类行能解释 -> 历史跨分类污染
+      if (stored && stored > correct
+        && !(sameDates.get(key) || new Set()).has(stored)
+        && (crossDates.get(key) || new Set()).has(stored)) {
+        pending.set(key, correct ? { fix: correct, from: stored } : { clear: true, from: stored });
       }
     }
     let updated = 0;
-    for (const [key, date] of pending) {
+    let corrected = 0;
+    for (const [key, act] of pending) {
       const sep = key.lastIndexOf('|');
-      const [res] = await pool.query(
-        `UPDATE library_subjects SET latest_date = ?
-         WHERE subject_id = ? AND category = ? AND COALESCE(latest_date, '') < ?`,
-        [date, key.slice(0, sep), key.slice(sep + 1), date]
-      );
-      updated += Number((res && res.affectedRows) || 0);
+      const sid = key.slice(0, sep);
+      const cat = key.slice(sep + 1);
+      let res;
+      if (act.clear) {
+        [res] = await pool.query(
+          `UPDATE library_subjects SET latest_date = NULL
+           WHERE subject_id = ? AND category = ? AND COALESCE(latest_date, '') = ?`,
+          [sid, cat, act.from]
+        );
+      } else if (act.fix) {
+        [res] = await pool.query(
+          `UPDATE library_subjects SET latest_date = ?
+           WHERE subject_id = ? AND category = ? AND COALESCE(latest_date, '') = ?`,
+          [act.fix, sid, cat, act.from]
+        );
+      } else {
+        [res] = await pool.query(
+          `UPDATE library_subjects SET latest_date = ?
+           WHERE subject_id = ? AND category = ? AND COALESCE(latest_date, '') < ?`,
+          [act.date, sid, cat, act.date]
+        );
+      }
+      const n = Number((res && res.affectedRows) || 0);
+      updated += n;
+      if (act.fix || act.clear) corrected += n;
     }
     latestLast = {
-      at: new Date().toISOString(), updated, candidates: pending.size,
+      at: new Date().toISOString(), updated, corrected, candidates: pending.size,
       calendar: (calRows || []).length, library: (libRows || []).length
     };
-    if (updated) console.log('[bookrelease] 最新一卷日期回写 updated=' + updated);
+    if (updated) {
+      console.log('[bookrelease] 最新一卷日期回写 updated=' + updated
+        + (corrected ? '（其中跨分类纠错 ' + corrected + '）' : ''));
+    }
     return { ok: true, ...latestLast, elapsedMs: Date.now() - t0 };
   } catch (e) {
     const msg = String((e && e.message) || e).slice(0, 500);
