@@ -51,11 +51,19 @@ function weekDateText(weekday) {
   const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + n - 1);
   return (d.getMonth() + 1) + '月' + d.getDate() + '日';
 }
+// 卡片上印的日期要跟「近期注目」判定是否近期的日期同源，否则列表没法看懂：
+// 书籍/游戏用 latest_date（最新一卷 / 最新发售日）判定算不算近期，卡片却只印 air_date（系列首卷首发日），
+// 就会出现「标着 2009 年、却排在近期头条」这种看不出道理的列表（排序其实是对的，只是没显示出来）。
+// latest_date 没探明（老数据、日历没扫到）或与首卷日相同（单卷完结 / galgame 单作）时，照旧显示 air_date。
+const latestDate = computed(() => String(props.subject.latest_date || ''));
+const latestLabel = computed(() => (Number(props.subject.type) === 4 ? '最新发售 ' : '最新一卷 '));
 const sub = computed(() => {
   const parts = [];
   if (props.calendar && props.subject.air_weekday) {
     const dateText = weekDateText(props.subject.air_weekday);
     if (dateText) parts.push(dateText);
+  } else if (latestDate.value && latestDate.value !== props.subject.air_date) {
+    parts.push(latestLabel.value + latestDate.value);
   } else if (props.subject.air_date) parts.push(props.subject.air_date);
   if (props.subject.rating && props.subject.rating.total) parts.push(scoreText(props.subject.rating.score) + ' 分');
   return parts.join(' · ');

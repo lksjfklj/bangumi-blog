@@ -792,11 +792,15 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   const lastPage = Math.max(1, Math.ceil(total / lim));
   const safePage = Math.min(pg, lastPage);
   const offset = (safePage - 1) * lim;
-  // 「近期注目」：按「最新一卷 / 最新发售日」排。
+  // 「近期注目」：先用「最新一卷 / 最新发售日」判定算不算「近期」，再在近期池里按热度排。
   // latest_date 由 bookrelease 扫日历窗口回写（书籍：剥掉卷号后匹配回系列）与 VNDB released 回写（Galgame）；
   // 没探明（老数据、窗口外、匹配不上）的回落 air_date（系列首卷首发日），长尾不会塌成空列表。
-  // 分两段：近 365 天内有新卷/新作的排前面并按日期倒序；+180 天以外才定档的以及库里的脏日期不算「近期」，
-  // 否则一条 2099 年的错日期会永远占着头名。其余按热度兜底 —— 9 千多条老书按首卷日期排会压成「老作品展」。
+  // 日期只做「是否近期」的判定、不做排序主键：书籍的 latest_date 大量是「还没开卖的新刊定档日」
+  //（线上库实测 85 部轻小说 / 126 部漫画的 latest_date 在未来），拿它倒序排等于「越晚才出越靠前」；
+  // 而卡片上显示的是 air_date（首卷首发日），两者对不上，首页就会变成「2009 年的书排第一」这种看不出道理的列表。
+  // 「注目」的权重只能给热度：近期池内按 rating_total 倒序，日期仅在热度相同时兜底。
+  // 窗口留 +180 天是为了收「已定档、即将出新卷」的作品；更远或库里 2099 这类脏日期不算近期，
+  // 否则一条错日期会永远占着头名。池外按热度兜底 —— 9 千多条老书按首卷日期排会压成「老作品展」。
   const effDate = "COALESCE(NULLIF(latest_date, ''), air_date)";
   const isRecent = `(${effDate} >= date('now', '-365 day') AND ${effDate} <= date('now', '+180 day'))`;
   // 命中等级：0 标题全等 > 1 标题前缀 > 2 标题包含 > 3 整标签 > 4 标签包含。
@@ -819,7 +823,6 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
     : sort === 'rating' ? 'rating_score DESC, rating_total DESC'
     : sort === 'trends'
       ? `CASE WHEN ${isRecent} THEN 0 ELSE 1 END,` +
-        ` CASE WHEN ${isRecent} THEN ${effDate} ELSE NULL END DESC,` +
         ` rating_total DESC, ${effDate} DESC, rank ASC`
       : 'rank ASC, rating_score DESC';
   const order = 'ORDER BY ' + relevanceKeys + orderKeys;

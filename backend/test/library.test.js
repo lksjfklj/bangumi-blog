@@ -113,7 +113,9 @@ test('regionsOf: 中日韩区域标签识别，无标签为空数组', () => {
 
 // ---------- queryLibrary「近期注目」（sort=trends）排序语义 ----------
 // 书籍的 air_date 是「系列首卷首发日」，latest_date 才是「最新一卷 / 最新发售日」（由 bookrelease 日历回写）。
-// 语义：近 365 天内有新卷的排前面并按日期倒序；未来 180 天以外的脏日期不算近期；其余回落首卷日 + 热度兜底。
+// 语义：先用「最新一卷」判定算不算近期（窗口 -365d ~ +180d），近期池内按热度 rating_total 倒序；
+// 未来 180 天以外（以及 2099 这类脏日期）不算近期，回落首卷日 + 热度兜底。
+// 日期不做排序主键：书籍的 latest_date 多是「未开卖的新刊定档日」，倒序会变成「越晚才出越靠前」。
 const T_ID_BASE = 900400001; // 独立假 ID 段
 const dayStr = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 
@@ -126,7 +128,7 @@ async function insTestBook(id, name, latest, ratingTotal, rank) {
     [id, name, name, ratingTotal, rank, latest, Date.now()]);
 }
 
-test('queryLibrary sort=trends: 有新卷的压过老经典，脏未来日期不抢头名，未探明的回落热度', async () => {
+test('queryLibrary sort=trends: 近期池按热度排（不按日期倒序），脏未来日期不抢头名，未探明的回落热度', async () => {
   const RECENT = T_ID_BASE + 1;   // 有最新一卷（窗口内）
   const MIDDLE = T_ID_BASE + 2;   // 有最新一卷（刚过去不久）
   const OLDHOT = T_ID_BASE + 3;   // 老经典：没有 latest_date，热度最高
@@ -138,8 +140,10 @@ test('queryLibrary sort=trends: 有新卷的压过老经典，脏未来日期不
   await insTestBook(DIRTY, '测试脏日期系列丙', '2099-01-01', 999998, 2);
 
   const out = await queryLibrary({ category: 'manga', sort: 'trends', keyword: '测试', limit: 10 });
-  assert.deepEqual(out.data.map(x => x.id), [RECENT, MIDDLE, OLDHOT, DIRTY]);
-  assert.equal(out.data[0].latest_date, dayStr(179), '接口要带出最新一卷日期');
+  // 近期池内按热度：MIDDLE(5 票) 压过 RECENT(1 票)；两人都在池里，谁的最新卷日期更晚不影响名次。
+  // 池外的 OLDHOT / DIRTY 热度再高也只能排在近期池之后。
+  assert.deepEqual(out.data.map(x => x.id), [MIDDLE, RECENT, OLDHOT, DIRTY]);
+  assert.equal(out.data[1].latest_date, dayStr(179), '接口要带出最新一卷日期');
   assert.equal(out.data[2].latest_date, '', '未探明的最新日期为空，前端按首卷日展示');
 
   // 其它排序不受影响：rank 仍按排名、rating 仍按评分
