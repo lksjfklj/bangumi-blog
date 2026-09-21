@@ -14,6 +14,9 @@ const props = defineProps({
   // 关联搜索的命中说明：后端在「书名没命中、靠标签命中」时给出命中的标签
   //（见 backend/src/library.js 的 queryLibrary），这里把它们高亮并排到最前面
   matchedTags: { type: Array, default: () => [] },
+  // 关联搜索的命中说明：后端在「书名没命中、靠别名命中」时给出命中的别名原文
+  //（见 backend/src/library.js 的 queryLibrary / aliasesOfRows），卡片上印「又名 XXX」
+  matchedAliases: { type: Array, default: () => [] },
   // 点标签跳去哪：默认收藏页；番剧库传空串，改由父级监听 tag-click 就地按标签筛选
   tagTarget: { type: String, default: '/collection' }
 });
@@ -30,6 +33,19 @@ const shownTags = computed(() => {
     out.push({ text: t, hit: hit.includes(t) });
   }
   return out.slice(0, 5);
+});
+// 「又名」只在书名没命中、靠别名找回来时才有值（后端只在这时给 matched_aliases），
+// 否则每张卡片都挂一行原名，正常浏览时反而变成噪音
+const aliasLine = computed(() => {
+  const a = props.matchedAliases;
+  if (!a || !a.length) return '';
+  // 别名和卡片标题一样时（VNDB 的 title 与库里的原名/译名撞了）不要印，否则是「Muv-Luv / 又名 Muv-Luv」
+  const shown = [String(props.subject.name_cn || '').trim().toLowerCase(), String(props.subject.name || '').trim().toLowerCase()];
+  const keep = a.filter((x) => {
+    const v = String(x || '').trim().toLowerCase();
+    return v && !shown.includes(v);
+  });
+  return keep.length ? '又名 ' + keep.join(' / ') : '';
 });
 const coverFailed = ref(false);
 // 首页放送表（首屏上方）优先加载，其余列表默认 auto
@@ -93,6 +109,7 @@ function goTag(t, e) {
     </div>
     <div class="info">
       <div class="title" :title="subject.name">{{ name }}</div>
+      <div v-if="aliasLine" class="alias-line" :title="aliasLine">{{ aliasLine }}</div>
       <div class="sub">{{ sub }}</div>
       <div v-if="shownTags.length" class="card-tags">
         <span
@@ -108,6 +125,8 @@ function goTag(t, e) {
 <style scoped>
 a.subject-card { text-decoration: none; color: inherit; }
 .no-cover { display: flex; align-items: center; justify-content: center; height: 100%; background: var(--cover-grad); color: var(--accent); font-size: 26px; font-weight: 700; }
+/* 关联搜索：「这条是靠哪个别名（原名/译名/罗马字）找回来的」 */
+.alias-line { font-size: 11px; line-height: 1.4; color: var(--tag-gold-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .card-tags .tag { font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 999px; background: var(--src-tag-bg); color: var(--src-tag-text); border: 1px solid var(--src-tag-border); }
 .card-tags .tag:hover { background: var(--accent); border-color: var(--accent); color: var(--grad-text); transform: translateY(-1px); }

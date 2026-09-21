@@ -1,8 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { NInput, NSelect, NButton, NPagination, NSpin, NEmpty, NAlert } from 'naive-ui';
-import { api, img } from '../api';
+import { api, img, scoreText } from '../api';
 import SubjectCard from '../components/SubjectCard.vue';
 import { useUserStore } from '../stores/user';
 
@@ -20,6 +20,7 @@ const size = 24;
 const result = ref([]);
 const total = ref(0);
 const titleMatches = ref(0); // 其中书名命中的条数（本地库的关联搜索会单独给出，用来解释多出来的标签关联结果）
+const aliasMatches = ref(0); // 其中「书名没命中、靠别名（原名/译名/罗马字）找回来」的条数，同上用来解释结果构成
 const loading = ref(false);
 const errorMsg = ref('');
 const localMode = ref(false);
@@ -29,6 +30,12 @@ const browseAirtime = ref(null); // 季度筛选（番剧，如 2026-7）
 const browseRegion = ref(null); // 地区筛选（书籍）
 const category = ref('anime'); // anime | manga | lightnovel | galgame
 const libStatus = ref(null);  // 书籍库同步状态
+// 搜索联想（输入即下拉）：只服务本地内容库，番剧没有本地全量库、打字时不打 Bangumi 接口
+const suggestItems = ref([]);
+const suggestOpen = ref(false);
+const suggestIndex = ref(-1);
+const suggestLoading = ref(false);
+const searchBox = ref(null);  // 联想面板要判断「点的是不是搜索框这一片」
 
 const categories = [
   { label: '番剧', value: 'anime' },
@@ -206,9 +213,17 @@ const emptyDescription = computed(() => {
 // 会让人以为搜错了或者搜索坏了
 const tagAssocNote = computed(() => {
   if (!keyword.value.trim()) return '';
-  const extra = total.value - (titleMatches.value || 0);
-  if (extra <= 0) return '';
-  return '· 其中书名命中 ' + titleMatches.value + ' 部，另 ' + extra + ' 部是标签关联（作者 / 文库 / 题材等）';
+  const t = titleMatches.value || 0;
+  const a = aliasMatches.value || 0;
+  const extra = total.value - t - a;
+  // 三条命中路径（书名 / 别名 / 标签）都要摊开说：只报「书名命中 N 部」会让
+  // 「搜罗马字出来一串日文名」「搜作者出来一堆书名里没这个词的书」看着像搜索坏了
+  if (a <= 0 && extra <= 0) return '';
+  const parts = [];
+  if (t > 0) parts.push('书名命中 ' + t + ' 部');
+  if (a > 0) parts.push('别名命中 ' + a + ' 部（原名 / 译名 / 罗马字）');
+  if (extra > 0) parts.push((parts.length ? '另 ' : '') + extra + ' 部是标签关联（作者 / 文库 / 题材等）');
+  return '· ' + parts.join('，');
 });
 
 let loadSeq = 0;
@@ -247,6 +262,7 @@ async function load() {
       result.value = d.data || [];
       total.value = d.total || 0;
       titleMatches.value = typeof d.titleMatches === 'number' ? d.titleMatches : (d.total || 0);
+      aliasMatches.value = typeof d.aliasMatches === 'number' ? d.aliasMatches : 0;
       if (d.source === 'local') localMode.value = true;
       errorMsg.value = '已超出可浏览范围，已自动跳转到最后一页（第 ' + target + ' 页）';
       loading.value = false;
@@ -255,6 +271,7 @@ async function load() {
     result.value = d.data || [];
     total.value = d.total || 0;
     titleMatches.value = typeof d.titleMatches === 'number' ? d.titleMatches : (d.total || 0);
+    aliasMatches.value = typeof d.aliasMatches === 'number' ? d.aliasMatches : 0;
     if (d.source === 'local') localMode.value = true;
     if (d.error) errorMsg.value = d.error;
   } catch (e) {
@@ -262,6 +279,7 @@ async function load() {
     result.value = [];
     total.value = 0;
     titleMatches.value = 0;
+    aliasMatches.value = 0;
     errorMsg.value = e.message || '加载失败，请稍后再试';
   }
   if (seq === loadSeq) loading.value = false;
@@ -275,7 +293,7 @@ function readQuery() {
   const q = route.query;
   category.value = typeof q.cat === 'string' && CATS.includes(q.cat) ? q.cat : 'anime';
   mode.value = q.mode === 'search' ? 'search' : 'browse';
-  keyword.value = typeof q.kw === 'string' ? q.kw : '';
+  setKeyword(typeof q.kw === 'string' ? q.kw : '');
   searchType.value = q.type ? +q.type : 2;
   browseSort.value = typeof q.sort === 'string' && q.sort ? q.sort : defaultBrowseSort.value;
   searchSort.value = q.ssort === 'rank' ? 'rank' : 'match';
@@ -307,6 +325,7 @@ function syncQuery() {
 }
 
 function doSearch() {
+  resetSuggest(); // 已经提交搜索了，下拉别盖在结果上（也作废在途的联想响应）
   mode.value = keyword.value.trim() ? 'search' : 'browse';
   page.value = 1;
   syncQuery();
@@ -336,7 +355,109 @@ function onKeywordClear() {
     syncQuery();
   }
 }
-function hot(k) { keyword.value = k; doSearch(); }
+function hot(k) { setKeyword(k); doSearch(); }
+
+// ---- 搜索联想（输入即下拉）----
+// 只服务本地内容库（漫画 / 轻小说 / Galgame）：本地有全量数据，边输入边查是零外部请求的纯本地查询。
+// 番剧没有本地全量库，打字时不去打 Bangumi 接口（既慢又会被限流），保持原来的回车搜索。
+const SUGGEST_LIMIT = 8;
+const SUGGEST_DEBOUNCE = 250;
+let suggestSeq = 0;      // 请求序号：只认最后一次输入发出的响应
+let suggestTimer = null; // 防抖
+let suggestSkip = false; // 程序性改词（点热门标签 / 路由回填）不弹下拉
+// 程序性改词走这里：用户没在输入，不该弹下拉
+function setKeyword(v) {
+  if (keyword.value === v) return;
+  suggestSkip = true;
+  keyword.value = v;
+}
+function closeSuggest() { suggestOpen.value = false; suggestIndex.value = -1; }
+function resetSuggest() {
+  if (suggestTimer) { clearTimeout(suggestTimer); suggestTimer = null; }
+  suggestSeq++; // 作废在途响应，免得它在面板关掉之后又弹回来
+  suggestLoading.value = false;
+  suggestItems.value = [];
+  closeSuggest();
+}
+// 候选里「这条为什么会出现」的说明：书名命中不用解释，别名 / 标签命中必须解释，
+// 否则「搜 MuvLuv 出来 マブラヴ」看着就像搜错了
+function suggestViaText(it) {
+  if (!it) return '';
+  if (it.via === 'alias' && it.alias) {
+    // 候选里已经显示原名了，别名跟它（或中文名）一模一样就别重复一遍
+    const shown = [String(it.name_cn || '').trim().toLowerCase(), String(it.name || '').trim().toLowerCase()];
+    return shown.includes(String(it.alias).trim().toLowerCase()) ? '' : '又名 ' + it.alias;
+  }
+  if (it.via === 'tag' && it.matched_tags && it.matched_tags.length) return '标签：' + it.matched_tags.join(' / ');
+  return '';
+}
+async function fetchSuggest(q) {
+  const seq = ++suggestSeq;
+  suggestLoading.value = true;
+  try {
+    const d = await api.get('/anime/suggest?category=' + encodeURIComponent(category.value) +
+      '&q=' + encodeURIComponent(q) + '&limit=' + SUGGEST_LIMIT);
+    if (seq !== suggestSeq) return; // 输入变了 / 换分类了 / 面板关了，这条响应已过期
+    const items = (d && Array.isArray(d.data)) ? d.data : [];
+    suggestItems.value = items;
+    suggestIndex.value = -1;
+    suggestOpen.value = items.length > 0;
+  } catch (e) {
+    if (seq !== suggestSeq) return;
+    suggestItems.value = [];
+    closeSuggest();
+  } finally {
+    if (seq === suggestSeq) suggestLoading.value = false;
+  }
+}
+// 排一次联想请求：顺手把在途的旧请求作废，免得旧候选在防抖窗口里先闪一下
+function scheduleSuggest(q, delay) {
+  if (suggestTimer) { clearTimeout(suggestTimer); suggestTimer = null; }
+  suggestSeq++;
+  suggestTimer = setTimeout(() => { suggestTimer = null; fetchSuggest(q); }, delay === undefined ? SUGGEST_DEBOUNCE : delay);
+}
+watch(keyword, (v) => {
+  const q = String(v || '').trim();
+  if (suggestSkip) { suggestSkip = false; resetSuggest(); return; }
+  if (!isBook.value || !q) { resetSuggest(); return; }
+  scheduleSuggest(q);
+});
+// Esc / 点别处关掉下拉之后，再点回输入框：词还在，候选也该还在（不重查关键词，只是重新拉一次）
+function onSearchFocus(e) {
+  if (e && e.target && e.target.closest && e.target.closest('.suggest-panel')) return;
+  const q = String(keyword.value || '').trim();
+  if (suggestOpen.value || !isBook.value || !q) return;
+  scheduleSuggest(q, 0);
+}
+// 选中候选直接进条目详情页（比「先搜一次再点进去」少一步）
+function openSuggest(it) {
+  if (!it || !it.id) return;
+  resetSuggest();
+  router.push('/subject/' + it.id);
+}
+function onSearchEnter() {
+  if (suggestOpen.value && suggestIndex.value >= 0 && suggestItems.value[suggestIndex.value]) {
+    openSuggest(suggestItems.value[suggestIndex.value]);
+    return;
+  }
+  doSearch();
+}
+function onSearchKeydown(e) {
+  const n = suggestItems.value.length;
+  if (e.key === 'ArrowDown') {
+    if (!n) return;
+    e.preventDefault(); // 不拦的话光标会跳到输入框首 / 尾
+    if (!suggestOpen.value) { suggestOpen.value = true; suggestIndex.value = 0; return; }
+    suggestIndex.value = (suggestIndex.value + 1) % n;
+  } else if (e.key === 'ArrowUp') {
+    if (!n) return;
+    e.preventDefault();
+    if (!suggestOpen.value) { suggestOpen.value = true; suggestIndex.value = n - 1; return; }
+    suggestIndex.value = suggestIndex.value <= 0 ? n - 1 : suggestIndex.value - 1;
+  } else if (e.key === 'Escape') {
+    closeSuggest();
+  }
+}
 // 点卡片上的标签 = 就地按这个标签筛选：退出搜索态并清空关键词，看到的是「该标签下的全部作品」，
 // 而不是「搜索词 ∩ 标签」的交集 —— 搜作者名时这两者往往一模一样，等于点了没跳
 function onCardTag(t) {
@@ -353,6 +474,7 @@ async function loadLibStatus() {
   try { libStatus.value = await api.get('/anime/library/status'); } catch (e) { /* ignore */ }
 }
 async function onCategoryChange() {
+  resetSuggest(); // 换分类就把上一个分类的候选清掉（否则切到「番剧」还挂着漫画的候选）
   keyword.value = '';
   mode.value = 'browse';
   browseTag.value = null;
@@ -444,7 +566,20 @@ async function loadReleaseCal() {
   }
 }
 watch(category, (v) => { if (CAL_CFG[v]) loadReleaseCal(); });
-onMounted(() => { readQuery(); loadLibStatus(); load(); loadReleaseCal(); });
+// 点搜索框以外的地方 = 关掉下拉（点候选不算，候选在搜索框里面）
+function onDocMousedown(e) {
+  const box = searchBox.value;
+  if (box && e.target && box.contains(e.target)) return;
+  resetSuggest();
+}
+onMounted(() => {
+  document.addEventListener('mousedown', onDocMousedown);
+  readQuery(); loadLibStatus(); load(); loadReleaseCal();
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onDocMousedown);
+  resetSuggest();
+});
 // 翻页/筛选通过 router.replace 更新 query（页面不再整页重挂载），监听 query 同步并重新加载
 watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
 </script>
@@ -467,11 +602,41 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
     </div>
 
     <div class="search-bar" v-reveal>
-      <n-input
-        v-model:value="keyword"
-        :placeholder="isBook ? '搜索' + catLabel + '…（书名 / 作者 / 文库 / 题材都能搜）' : '搜索番剧、书籍、游戏…（如：进击的巨人）'"
-        size="large" clearable @keyup.enter="doSearch" @clear="onKeywordClear"
-      />
+      <!-- 搜索联想：本地内容库（漫画/轻小说/Galgame）边输入边出候选；番剧保持原来的回车搜索 -->
+      <div
+        ref="searchBox" class="search-box"
+        @keydown="onSearchKeydown" @keyup.enter="onSearchEnter"
+        @focusin="onSearchFocus" @click="onSearchFocus"
+      >
+        <n-input
+          v-model:value="keyword"
+          :placeholder="isBook ? '搜索' + catLabel + '…（书名 / 作者 / 文库 / 题材都能搜）' : '搜索番剧、书籍、游戏…（如：进击的巨人）'"
+          size="large" clearable @clear="onKeywordClear"
+        />
+        <!-- mousedown.prevent：点候选时先别让输入框失焦，否则下拉在 click 之前就没了 -->
+        <div v-if="suggestOpen && suggestItems.length" class="suggest-panel" @mousedown.prevent>
+          <div
+            v-for="(it, i) in suggestItems" :key="it.category + '-' + it.id"
+            class="suggest-item" :class="{ active: i === suggestIndex }"
+            @mouseenter="suggestIndex = i" @click="openSuggest(it)"
+          >
+            <img v-if="it.image" class="sg-cover" :src="img(it.image)" :alt="it.name" loading="lazy" decoding="async" />
+            <div v-else class="sg-no-cover">{{ String(it.name_cn || it.name || '?').slice(0, 1) }}</div>
+            <div class="sg-meta">
+              <div class="sg-title">{{ it.name_cn || it.name }}</div>
+              <div v-if="it.name && it.name !== it.name_cn" class="sg-origin">{{ it.name }}</div>
+              <div v-if="suggestViaText(it)" class="sg-via">{{ suggestViaText(it) }}</div>
+            </div>
+            <div class="sg-right">
+              <span v-if="it.air_date" class="sg-year">{{ String(it.air_date).slice(0, 4) }}</span>
+              <span v-if="it.rating && it.rating.total" class="sg-score">{{ scoreText(it.rating.score) }}</span>
+            </div>
+          </div>
+          <div class="suggest-foot">
+            ↑↓ 选择 · Enter 打开 · Esc 关闭<template v-if="suggestLoading"> · 查询中…</template>
+          </div>
+        </div>
+      </div>
       <n-select v-if="mode === 'search' && !isBook" v-model:value="searchType" :options="typeOptions" style="width:110px" @update:value="onTypeChange" />
       <n-select
         v-model:value="sortValue"
@@ -568,7 +733,7 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
              改由 onCardTag 就地按该标签筛选 -->
         <SubjectCard
           v-for="s in result" :key="category + '-' + s.id" :subject="s"
-          :tags="s.tags || []" :matched-tags="s.matched_tags || []" tag-target=""
+          :tags="s.tags || []" :matched-tags="s.matched_tags || []" :matched-aliases="s.matched_aliases || []" tag-target=""
           @tag-click="onCardTag"
         />
       </div>
@@ -594,6 +759,24 @@ watch(() => route.query, () => { readQuery(); load(); }, { deep: true });
   color: var(--grad-text); box-shadow: 0 0 18px var(--seg-shadow);
 }
 .search-bar { display: flex; gap: 10px; margin-top: 4px; }
+/* 搜索框 + 联想下拉：下拉绝对定位在输入框正下方，不挤动右边的排序/搜索按钮 */
+.search-box { position: relative; flex: 1; min-width: 0; }
+.suggest-panel {
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 6px);
+  padding: 6px; border-radius: 14px; max-height: 60vh; overflow-y: auto;
+  background: var(--bg-card); border: 1px solid var(--back-btn-border); box-shadow: var(--shadow);
+}
+.suggest-item { display: flex; gap: 10px; align-items: center; padding: 7px 8px; border-radius: 10px; cursor: pointer; transition: background .12s; }
+.suggest-item.active { background: var(--src-tag-bg); }
+.sg-cover { width: 38px; height: 52px; object-fit: cover; border-radius: 6px; flex: none; background: var(--cover-grad); }
+.sg-no-cover { width: 38px; height: 52px; flex: none; border-radius: 6px; display: flex; align-items: center; justify-content: center; background: var(--cover-grad); color: var(--accent); font-weight: 700; }
+.sg-meta { min-width: 0; flex: 1; }
+.sg-title { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sg-origin { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sg-via { font-size: 11px; margin-top: 2px; color: var(--tag-gold-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sg-right { flex: none; text-align: right; font-size: 12px; color: var(--text-dim); }
+.sg-score { display: block; font-weight: 700; color: var(--tag-gold-text); }
+.suggest-foot { margin-top: 4px; padding: 6px 8px 2px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); opacity: .8; }
 .filter-bar { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; flex-wrap: wrap; font-size: 13px; }
 .filter-hint { font-size: 12px; opacity: .7; }
 .result-info { margin: 16px 0 14px; font-size: 13px; color: var(--text-dim); }

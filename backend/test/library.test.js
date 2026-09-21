@@ -1,7 +1,7 @@
 // library.test.js - 本地内容库分类器单测（书籍 classify / 游戏 classifyGame）
 const { test, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { classify, classifyGame, regionsOf, queryLibrary } = require('../src/library');
+const { classify, classifyGame, regionsOf, queryLibrary, suggestLibrary, rebuildAliases, writeAliasesForSubject } = require('../src/library');
 const { initDb, pool } = require('../src/db');
 
 initDb(); // 「近期注目」排序走真实 SQLite，这里直接在开发库上验排序语义
@@ -235,6 +235,127 @@ test('queryLibrary 关联搜索: LIKE 通配符/引号等特殊字符不报错�
 });
 
 
+// ---- 别名索引 / 搜索联想（search-as-you-type）----
+// 别名来源只有 ext.vndb（零外部请求）：title=罗马字/英文名、alttitle=日文原名、aliases=官方别名。
+// Bangumi 自己的「别名 / 罗马字」在 infobox 里、没同步下来，要逐条打 API 才能拿，所以不在这条链路上。
+const T_ALIAS_BASE = 900600001;
+const ALIAS_KW = 'zetaliasq';
+const insGalgame = (id, name, nameCn, ext, tags) => pool.query(
+  `INSERT INTO library_subjects (subject_id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, platform, tags, regions, latest_date, blocked, ext, updated_at)
+   VALUES (?, 'galgame', ?, ?, '', '2003-02-28', 8.5, 100, 100, '游戏', ?, '["日本"]', '', 0, ?, ?)
+   ON CONFLICT(subject_id, category) DO UPDATE SET name = excluded.name, name_cn = excluded.name_cn, tags = excluded.tags,
+     ext = excluded.ext, blocked = 0, updated_at = excluded.updated_at`,
+  [id, name, nameCn, tags, ext, Date.now()]);
+const clearAlias = async () => {
+  await pool.query('DELETE FROM library_aliases WHERE subject_id BETWEEN ? AND ?', [T_ALIAS_BASE, T_ALIAS_BASE + 99]);
+  await pool.query('DELETE FROM library_subjects WHERE subject_id BETWEEN ? AND ?', [T_ALIAS_BASE, T_ALIAS_BASE + 99]);
+};
+
+test('queryLibrary 别名检索: 罗马字 / 英文别名 / 空格变体与日文原名都能命中，并给出「又名」', async () => {
+  await clearAlias();
+  const ID = T_ALIAS_BASE + 1;
+  const ext = JSON.stringify({ vndb: { id: 'v9001', title: 'Gyakuten Saiban 3', alttitle: '逆転裁判3', aliases: ['AA3', 'Phoenix Wright: Ace Attorney 3'] } });
+  await insGalgame(ID, '逆転裁判3', '逆转裁判3', ext, '[]');
+  await writeAliasesForSubject(ID, 'galgame', ext);
+
+  // 罗马字：name / name_cn 里根本没有这个词，靠 ext.vndb.title 找回来
+  const romaji = await queryLibrary({ category: 'galgame', keyword: 'Gyakuten Saiban 3', limit: 5 });
+  const hit = romaji.data.find(x => x.id === ID);
+  assert.ok(hit, '罗马字别名要能搜到');
+  assert.deepEqual(hit.matched_aliases, ['Gyakuten Saiban 3']);
+  assert.deepEqual(hit.matched_tags, []);
+  assert.equal(romaji.titleMatches, 0, '书名没命中就不该记到书名命中数上');
+  assert.equal(romaji.aliasMatches, 1, '别名命中要单独报数，前端才解释得清结果为什么变多');
+
+  // 官方别名 / 大小写 / 空格变体（Muv-Luv 与 MuvLuv 这类写法差异）
+  for (const kw of ['AA3', 'aa3', 'Phoenix Wright: Ace Attorney 3', '逆転裁判 3']) {
+    const out = await queryLibrary({ category: 'galgame', keyword: kw, limit: 5 });
+    assert.ok(out.data.some(x => x.id === ID), kw + ' 应该命中同一条');
+  }
+  // 书名自己命中时不再挂「命中的别名」，否则每条都挂一堆解释文案
+  const byTitle = await queryLibrary({ category: 'galgame', keyword: '逆転裁判3', limit: 5 });
+  const t = byTitle.data.find(x => x.id === ID);
+  assert.ok(t && byTitle.titleMatches >= 1);
+  assert.deepEqual(t.matched_aliases, []);
+  // 单字不许在别名上做子串匹配（「A」不该把别名 AA3 捞出来）
+  const single = await queryLibrary({ category: 'galgame', keyword: 'A', limit: 20 });
+  assert.ok(!single.data.some(x => x.id === ID), '单字只在别名上做精确匹配');
+});
+
+test('别名索引: 重新回填会清掉旧别名（改绑 VNDB 条目不留幽灵命中）', async () => {
+  await clearAlias();
+  const ID = T_ALIAS_BASE + 2;
+  const ext1 = JSON.stringify({ vndb: { id: 'v1', title: 'Old Title QQ', alttitle: '', aliases: [] } });
+  await insGalgame(ID, '幽灵测试条目标题', '幽灵测试条目', ext1, '[]');
+  await writeAliasesForSubject(ID, 'galgame', ext1);
+  assert.ok((await queryLibrary({ category: 'galgame', keyword: 'Old Title QQ', limit: 5 })).data.some(x => x.id === ID));
+
+  const ext2 = JSON.stringify({ vndb: { id: 'v2', title: 'New Title QQ', alttitle: '', aliases: [] } });
+  await pool.query("UPDATE library_subjects SET ext = ? WHERE subject_id = ? AND category = 'galgame'", [ext2, ID]);
+  await writeAliasesForSubject(ID, 'galgame', ext2);
+  assert.ok(!(await queryLibrary({ category: 'galgame', keyword: 'Old Title QQ', limit: 5 })).data.some(x => x.id === ID),
+    '换绑后旧别名不该还留在索引里');
+  assert.ok((await queryLibrary({ category: 'galgame', keyword: 'New Title QQ', limit: 5 })).data.some(x => x.id === ID));
+});
+
+test('rebuildAliases: 内容没变就跳过、坏 ext 不炸、重建后的索引立刻可搜', async () => {
+  await clearAlias();
+  const ID = T_ALIAS_BASE + 3;
+  const ext = JSON.stringify({ vndb: { id: 'v3', title: 'Rebuild Test Title', alttitle: '', aliases: ['RT Alias'] } });
+  await insGalgame(ID, '重建测试条目标题', '重建测试条目', ext, '[]');
+  // ext 里带 "vndb" 但 JSON 是坏的（历史脏数据/写坏的行）：重建只能跳过它，不能整轮失败
+  await insGalgame(T_ALIAS_BASE + 4, '坏 ext 标题', '坏 ext 标题', '{"vndb": broken', '[]');
+
+  const r1 = await rebuildAliases({ force: true });
+  assert.equal(r1.error, undefined);
+  assert.ok(r1.scanned >= 2);
+  const [rows] = await pool.query('SELECT COUNT(*) AS n FROM library_aliases WHERE subject_id = ?', [ID]);
+  assert.equal(rows[0].n, 2, '只认 ext.vndb 里的标题族（title + aliases）');
+  const r2 = await rebuildAliases();
+  assert.equal(r2.skipped, true, '指纹一致时整表重建应当直接跳过，不是每轮同步都重写整表');
+  assert.ok((await queryLibrary({ category: 'galgame', keyword: 'RT Alias', limit: 5 })).data.some(x => x.id === ID));
+});
+
+test('suggestLibrary: 联想只查本地库，标出命中理由（书名/别名/标签），并顶住脏参数', async () => {
+  await clearAlias();
+  const TITLE = T_ALIAS_BASE + 11;
+  const ALIASED = T_ALIAS_BASE + 12;
+  const TAGGED = T_ALIAS_BASE + 13;
+  await insGalgame(TITLE, ALIAS_KW + ' 标题命中', ALIAS_KW + ' 标题命中', '{}', '[]');
+  const ext = JSON.stringify({ vndb: { id: 'v9', title: ALIAS_KW + ' Alias Name', alttitle: '', aliases: [] } });
+  await insGalgame(ALIASED, '别名命中条目', '别名命中条目', ext, '[]');
+  await writeAliasesForSubject(ALIASED, 'galgame', ext);
+  await insGalgame(TAGGED, '标签关联条目', '标签关联条目', '{}', '["' + ALIAS_KW + '作者"]');
+
+  const out = await suggestLibrary({ category: 'galgame', keyword: ALIAS_KW, limit: 10 });
+  assert.equal(out.data.length, 3);
+  assert.equal(out.data[0].id, TITLE, '书名命中要排在前面');
+  assert.equal(out.data[0].via, 'title');
+  const a = out.data.find(x => x.id === ALIASED);
+  assert.equal(a.via, 'alias');
+  assert.equal(a.alias, ALIAS_KW + ' Alias Name');
+  assert.equal(a.type, 4, '游戏分类按 Bangumi 类型 4 返回，卡片才显示「游戏」');
+  const g = out.data.find(x => x.id === TAGGED);
+  assert.equal(g.via, 'tag');
+  assert.deepEqual(g.matched_tags, [ALIAS_KW + '作者']);
+
+  // 单字也要能联想（书名照旧 LIKE；别名/标签在单字时只做精确匹配，防灌水）
+  const single = await suggestLibrary({ category: 'galgame', keyword: '标', limit: 10 });
+  assert.ok(single.data.some(x => x.id === TITLE), '单个汉字也要能出联想结果');
+
+  // 脏参数：数组 category（?category[]=x）、原型链键（constructor）、注入串、空词、负数 limit
+  assert.ok((await suggestLibrary({ category: 'galgame', keyword: ALIAS_KW, limit: -5 })).data.length <= 1);
+  assert.deepEqual((await suggestLibrary({ category: { evil: 1 }, keyword: ALIAS_KW })).data, []);
+  assert.deepEqual((await suggestLibrary({ category: '123', keyword: ALIAS_KW })).data, []);
+  assert.equal((await suggestLibrary({ category: ['galgame'], keyword: ALIAS_KW })).category, 'galgame',
+    '?category[]=galgame 这类数组参数取第一个元素（与 Express 的正常行为一致）');
+  assert.deepEqual((await suggestLibrary({ category: 'constructor', keyword: ALIAS_KW })).data, []);
+  assert.deepEqual((await suggestLibrary({ category: 'galgame', keyword: '   ' })).data, []);
+  const inj = await suggestLibrary({ category: 'galgame', keyword: "' OR 1=1 --" });
+  assert.ok(!inj.data.some(x => x.id >= T_ALIAS_BASE), '注入串不该把整表捞出来');
+});
 after(async () => {
   await pool.query('DELETE FROM library_subjects WHERE subject_id >= ?', [T_ID_BASE]);
+  await pool.query('DELETE FROM library_aliases WHERE subject_id >= ?', [T_ID_BASE]);
 });
+

@@ -1,7 +1,7 @@
 // routes/anime.js - 番剧数据（日历/搜索/条目/章节/角色/制作人员/相关）
 const express = require('express');
 const { bgm, bgmWeb, cached, getValidToken } = require('../bangumi');
-const { queryLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
+const { queryLibrary, suggestLibrary, syncStatus, runSync, runVndbSync, vndbStatus, kickVndbEnrich } = require('../library');
 const { requireOwner } = require('../auth');
 const releasecal = require('../releasecal');
 const bookrelease = require('../bookrelease');
@@ -284,6 +284,18 @@ router.post('/library/sync', requireOwner, async (req, res, next) => {
     next(e);
   }
 });
+// GET /api/anime/suggest?category=manga&q=电锯&limit=8
+// 搜索联想（输入即下拉）：本地内容库（漫画/轻小说/Galgame）零外部请求，命中规则与 /browser 的搜索结果共用。
+// 番剧分类没有本地全量库，这里直接返回空列表，前端据此保持原来的在线搜索行为（不给 Bangumi 打一串请求）。
+router.get('/suggest', async (req, res, next) => {
+  try {
+    const category = strParam(req.query.category, '').trim();
+    const q = strParam(req.query.q !== undefined ? req.query.q : req.query.keyword, '').trim().slice(0, 60);
+    const limit = clampInt(req.query.limit, 8, 1, 20);
+    res.json(await suggestLibrary({ category, keyword: q, limit }));
+  } catch (e) { next(e); }
+});
+
 // GET /api/anime/browser?page=1&sort=rank&tag=科幻&year=2024
 router.get('/browser', async (req, res, next) => {
   try {

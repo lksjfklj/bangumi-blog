@@ -474,6 +474,8 @@ async function setVndbExt(bgmId, extJson) {
   );
   // 顺手把 VNDB 发售日同步进 latest_date（「近期注目」按最新发售日排序用）
   await applyLatestFromExt(bgmId, extJson);
+  // 别名索引同步跟进（联想 + 别名检索用）：单条目增量更新，不必等整轮重建
+  await writeAliasesForSubject(bgmId, 'galgame', extJson);
 }
 
 // 存量 galgame 的 latest_date 回填：ext.vndb.released 早就在库里，纯本地一遍过、零外部请求。
@@ -704,6 +706,10 @@ async function ensureSync() {
         const bk = await bookrelease.syncLatestDates();
         console.log('[library] 最新日期回填 galgame=' + (gl.updated || 0) + ' books=' + ((bk && bk.updated) || 0)
           + (bk && bk.corrected ? '（跨分类纠错 ' + bk.corrected + '）' : ''));
+        // 别名索引跟着库存重建：纯本地扫描 ext.vndb + 指纹比对，没变化时是空跑（毫秒级）
+        const al = await rebuildAliases();
+        if (al.error) console.error('[library] 别名索引重建失败:', al.error);
+        else console.log('[library] 别名索引 ' + (al.skipped ? '无变化' : '已重建') + '：条目=' + al.scanned + ' 别名=' + al.aliases);
       } catch (e) { console.error('[library] 最新日期回填失败:', e.message); }
     }
     const [rows] = await pool.query('SELECT COUNT(*) AS n FROM library_subjects');
@@ -725,6 +731,10 @@ async function ensureSync() {
     }
     // 存量 galgame 从未做过 VNDB 回填（老库部署/手工补库后），后台补一轮
     if (!(await getMeta('vndb_last_run'))) kickVndbEnrich();
+    // 每轮同步收尾再对一次别名索引（本轮书籍/游戏同步可能刚补进新条目，指纹没变就是空跑）
+    const ali = await rebuildAliases();
+    if (ali.error) console.error('[library] 别名索引重建失败:', ali.error);
+    else if (!ali.skipped) console.log('[library] 别名索引已重建：条目=' + ali.scanned + ' 别名=' + ali.aliases);
   } catch (e) { console.error('[library] ensureSync fail:', e.message); }
 }
 
@@ -741,15 +751,211 @@ async function syncStatus() {
   return { syncing, lastSync: lastSync || restored, meta: null };
 }
 
+// ============================================================
+// 别名索引（零外部请求）
+// 名称检索原先只有 name（Bangumi 原名，多为日文）+ name_cn（中文译名）两列，用户拿别名/罗马字/英文名
+// 一律搜不到：线上实测「Chainsaw Man」「Spice and Wolf」「MuvLuv」「Shigatsu Youka」都是 0 条命中。
+// 唯一零成本的别名来源是 VNDB 已经回填进 ext.vndb 的标题族：
+//   title    = 罗马字 / 英文名（Gyakuten Saiban 3、Muv-Luv）
+//   alttitle = 日文原名（逆転裁判3）
+//   aliases  = 官方别名（AA3、Phoenix Wright: Ace Attorney 3…）
+// 这里把它落进 library_aliases，纯本地重建，不额外打任何 API。
+//（Bangumi 条目的「别名 / 罗马字」在 infobox 里，没被同步下来，要逐条打 API 才能拿，暂不索引。）
+// ============================================================
+const ALIAS_SIG_KEY = 'alias_index_sig';
+const ALIAS_INSERT = 'INSERT OR REPLACE INTO library_aliases' +
+  ' (subject_id, category, alias, alias_type, norm, compact) VALUES (?, ?, ?, ?, ?, ?)';
+
+// 归一化：NFKC 折全角、小写、空格折叠。norm/compact 都由它在本地算，匹配时关键字走同一套变换
+function normalizeAlias(v) {
+  return strParam(v).normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+// 紧凑形式：去掉空格与各种连接符，让「MuvLuv」「muv luv」「Muv·Luv」都能落到「Muv-Luv」上
+function compactAlias(v) {
+  return normalizeAlias(v).replace(/[\s\-_·・･‧'’]+/g, '');
+}
+// 从 ext.vndb 取标题族，顺序即可信度：日文原名 > 罗马字/英文名 > 别名
+function aliasesFromExt(extJson) {
+  const out = [];
+  let ext = null;
+  try { ext = JSON.parse(extJson || '{}'); } catch (e) { return out; }
+  const v = ext && ext.vndb;
+  if (!v || !v.id) return out;
+  const add = (raw, type) => {
+    const alias = strParam(raw).trim();
+    // 1 个字符的别名（「A」）和整段简介都丢掉：前者命中面太大，后者不可能是名字
+    if (alias.length < 2 || alias.length > 80) return;
+    out.push({ alias, type });
+  };
+  add(v.alttitle, 'vndb_alttitle');
+  add(v.title, 'vndb_title');
+  for (const a of (Array.isArray(v.aliases) ? v.aliases : [])) add(a, 'vndb_alias');
+  return out;
+}
+// 索引指纹：只用来判断「要不要重建」，不需要密码学强度
+function aliasFingerprint(entries) {
+  let h = 2166136261;
+  for (const e of entries) {
+    const line = e[0] + '\u0002' + e[2] + '\u0002' + e[3];
+    for (let i = 0; i < line.length; i++) {
+      h ^= line.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+  }
+  return (h >>> 0).toString(36) + '.' + entries.length;
+}
+// 单条目增量更新（VNDB 回填刚写完一条 ext 时调用，让索引立刻跟上，不必等整轮重建）
+async function writeAliasesForSubject(subjectId, category, extJson) {
+  try {
+    await pool.query('DELETE FROM library_aliases WHERE subject_id = ? AND category = ?', [subjectId, category]);
+    const seen = new Set();
+    for (const a of aliasesFromExt(extJson)) {
+      const key = a.type + '\u0001' + a.alias;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      await pool.query(ALIAS_INSERT, [subjectId, category, a.alias, a.type, normalizeAlias(a.alias), compactAlias(a.alias)]);
+    }
+  } catch (e) { /* 索引失败不能影响同步主流程 */ }
+}
+// 全量重建：库变了索引就跟着变（启动一次 + 每轮同步后一次）。纯本地扫描，零外部请求。
+async function rebuildAliases({ force = false } = {}) {
+  const out = { scanned: 0, aliases: 0, skipped: false };
+  try {
+    const [rows] = await pool.query(
+      `SELECT subject_id AS id, category, ext FROM library_subjects
+       WHERE blocked = 0 AND ext IS NOT NULL AND ext LIKE '%"vndb"%'`
+    );
+    const entries = [];
+    const seen = new Set();
+    for (const r of rows || []) {
+      out.scanned++;
+      for (const a of aliasesFromExt(r.ext)) {
+        const key = r.id + '\u0001' + r.category + '\u0001' + a.type + '\u0001' + a.alias;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        entries.push([r.id, r.category, a.alias, a.type, normalizeAlias(a.alias), compactAlias(a.alias)]);
+      }
+    }
+    out.aliases = entries.length;
+    const sig = aliasFingerprint(entries);
+    const [cnt] = await pool.query('SELECT COUNT(*) AS n FROM library_aliases');
+    if (!force && Number(cnt[0].n) === entries.length && (await getMeta(ALIAS_SIG_KEY)) === sig) {
+      out.skipped = true;
+      return out;
+    }
+    // 整表替换放在事务里：重建中途失败时不会留下「一半旧一半新」的索引
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query('DELETE FROM library_aliases');
+      for (const e of entries) await conn.query(ALIAS_INSERT, e);
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+    await setMeta(ALIAS_SIG_KEY, sig);
+  } catch (e) { out.error = e.message; }
+  return out;
+}
+
+// 把「别名表上的条件」包成针对当前 library_subjects 行的 EXISTS 判定
+function aliasExists(cond) {
+  return 'EXISTS (SELECT 1 FROM library_aliases la WHERE la.subject_id = library_subjects.subject_id' +
+    ' AND la.category = library_subjects.category AND ' + cond + ')';
+}
+
+// 关键词命中规则与排序等级的唯一出处：queryLibrary（搜索结果）与 suggestLibrary（联想下拉）共用，
+// 免得「下拉里出现的条目」和「搜出来的结果」按两套规则打架。
+// 等级：0 标题全等 > 1 标题前缀 > 2 标题包含 > 3 别名全等 > 4 别名前缀 > 5 别名包含 > 6 整标签 > 7 标签包含
+function keywordMatch(kw) {
+  if (!kw) return null;
+  const like = '%' + escapeLike(kw) + '%';
+  const kwPrefix = escapeLike(kw) + '%';
+  const tagWholeLike = '%"' + escapeLike(kw) + '"%';
+  // 单字关键词禁止标签/别名子串匹配：库里 61969 个标签有 26304 个只有 1~2 字，
+  // 「分」「人」这类单字模糊匹配会拖出几百条毫不相关的作品；单字只留「整标签 / 整别名等于它」这种精确命中。
+  const fuzzy = kw.length >= TAG_SUBSTR_MIN;
+  const tagLike = fuzzy ? like : tagWholeLike;
+  const nkw = normalizeAlias(kw);
+  // 关键字只有连接符（「—」）时紧凑形式会变空串，而 LIKE '%%' 会命中一切 —— 退回归一化形式兜底
+  const ckw = compactAlias(kw) || nkw;
+  const nkwLike = '%' + escapeLike(nkw) + '%';
+  const ckwLike = '%' + escapeLike(ckw) + '%';
+  const nkwPrefix = escapeLike(nkw) + '%';
+  const ckwPrefix = escapeLike(ckw) + '%';
+  // 列名统一带 la. 前缀：同一段条件既要塞进 EXISTS（主查询/计数），
+  // 也要能直接查 library_aliases 反查「这条是靠哪个别名命中的」（见 aliasesOfRows）
+  const aliasExactCond = "(la.norm = ? OR (la.compact <> '' AND la.compact = ?))";
+  const aliasLikeCond = '(la.norm LIKE ? ' + LIKE_ESC + " OR (la.compact <> '' AND la.compact LIKE ? " + LIKE_ESC + '))';
+  const aliasCond = fuzzy ? aliasLikeCond : aliasExactCond;
+  const aliasExactWhere = aliasExists(aliasExactCond);
+  const aliasPrefixWhere = fuzzy ? aliasExists(aliasLikeCond) : '0';
+  const aliasContainsWhere = fuzzy ? aliasExists(aliasLikeCond) : '0';
+  const aliasWhereSql = fuzzy ? aliasExists(aliasLikeCond) : aliasExactWhere;
+  const aliasWhereParams = fuzzy ? [nkwLike, ckwLike] : [nkw, ckw];
+  return {
+    kw,
+    like,
+    tagWholeLike,
+    fuzzy,
+    // 别名条件（带 la. 前缀）与它的参数：aliasesOfRows 直接拿去查别名表
+    aliasCond,
+    aliasWhereSql,
+    aliasWhereParams,
+    whereSql: '(name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC +
+      ' OR tags LIKE ? ' + LIKE_ESC + ' OR ' + aliasWhereSql + ')',
+    whereParams: [like, like, tagLike, ...aliasWhereParams],
+    orderSql:
+      'CASE WHEN name = ? COLLATE NOCASE OR name_cn = ? COLLATE NOCASE THEN 0' +
+      ' WHEN name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ' THEN 1' +
+      ' WHEN name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ' THEN 2' +
+      ' WHEN ' + aliasExactWhere + ' THEN 3' +
+      ' WHEN ' + aliasPrefixWhere + ' THEN 4' +
+      ' WHEN ' + aliasContainsWhere + ' THEN 5' +
+      ' WHEN tags LIKE ? ' + LIKE_ESC + ' THEN 6 ELSE 7 END, ',
+    orderParams: [
+      kw, kw, kwPrefix, kwPrefix, like, like,
+      nkw, ckw,
+      ...(fuzzy ? [nkwPrefix, ckwPrefix] : []),
+      ...(fuzzy ? [nkwLike, ckwLike] : []),
+      tagWholeLike
+    ]
+  };
+}
+
+// 反查这些条目命中的别名原文（每行最多留 2 个，前端显示「又名 XXX」用）。
+// 一次 IN 查询覆盖整页，不给每条一次往返；失败只影响解释文案，不影响搜索结果本身。
+async function aliasesOfRows(rows, category, km) {
+  const out = new Map();
+  if (!km || !rows || !rows.length) return out;
+  try {
+    const ids = rows.map(r => r.id);
+    const [ars] = await pool.query(
+      'SELECT la.subject_id AS id, la.alias FROM library_aliases la' +
+      ' WHERE la.category = ? AND la.subject_id IN (' + ids.map(() => '?').join(',') + ')' +
+      ' AND ' + km.aliasCond + ' LIMIT 400',
+      [category, ...ids, ...km.aliasWhereParams]
+    );
+    for (const r of ars || []) {
+      const arr = out.get(r.id) || [];
+      if (arr.length < 2 && !arr.includes(r.alias)) arr.push(r.alias);
+      out.set(r.id, arr);
+    }
+  } catch (e) { /* 别名反查失败不阻塞搜索 */ }
+  return out;
+}
 // 本地库分页查询（category: manga / lightnovel / galgame）
 async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', keyword = '', tag = '', year = '', region = '' }) {
   // 分页参数在这里统一夹成整数：调用方会把 req.query.page 原样传进来，
   // page=1.5 会算出小数 OFFSET，SQLite 直接抛 datatype mismatch（500）
   const lim = clampInt(limit, 24, 1, 100);
   const pg = clampInt(page, 1, 1, MAX_PAGE);
-  // 先拼「与关键词无关」的条件（分类/标签/年份/地区）。关键词单独放，是因为标签关联搜索要再单独算一次
-  // 「标题命中数」，好让接口能说清「共 N 部，其中 M 部是标签关联出来的」—— 搜索范围悄悄变宽又不交代，
-  // 用户只会觉得结果变水了。
+  // 先拼「与关键词无关」的条件（分类/标签/年份/地区）。关键词单独放，是因为要再单独算一次
+  // 「书名命中 / 别名命中」的条数，好让接口说清「共 N 部，其中 M 部书名命中、K 部是按别名（译名/罗马字）找回来的」——
+  // 搜索范围悄悄变宽又不交代，用户只会觉得结果变水了。
   const base = [CATEGORY_SQL[category], 'blocked = 0'];
   const baseParams = [];
   if (tag) {
@@ -768,35 +974,41 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
       baseParams.push('%' + escapeLike('"' + region + '"') + '%');
     }
   }
-  // ---- 关联搜索：关键词同时匹配「标题」与「标签」----
-  // 库里 tags 存着作者/出版社/杂志/题材（野村美月、藤本タツキ、周刊少年JUMP…），只搜标题时这些关系是死的：
-  // 实测搜「野村美月」标题命中 0 条，而轻小说分类下她有 35 部（漫画分类下标注她为作者的 3 部） —— 这才是「想找作者却只能搜书名」的窟窿。
+  // ---- 关联搜索：关键词同时匹配「标题」「别名（原名/译名/罗马字）」与「标签」----
+  // 名称只有 name（Bangumi 原名，多为日文）+ name_cn（中文译名）两列，用户拿罗马字/英文名一律搜不到
+  //（线上实测「Chainsaw Man」「Spice and Wolf」「MuvLuv」都是 0 条）；别名来自 ext.vndb 的零成本索引。
+  // 标签则承载作者/出版社/杂志/题材（野村美月、藤本タツキ、周刊少年JUMP…），只搜标题时这些关系是死的：
+  // 实测搜「野村美月」标题命中 0 条，而轻小说分类下她有 35 部 —— 这才是「想找作者却只能搜书名」的窟窿。
   const kw = strParam(keyword).trim();
-  const like = kw ? '%' + escapeLike(kw) + '%' : '';
-  const tagWholeLike = kw ? '%"' + escapeLike(kw) + '"%' : '';
-  // 单字关键词禁止标签子串匹配：库里 61969 个标签有 26304 个只有 1~2 字，
-  // 「分」「人」这类单字模糊匹配会拖出几百条毫不相关的作品，单字只留「整标签等于它」这种精确命中。
-  const tagLike = kw.length >= TAG_SUBSTR_MIN ? like : tagWholeLike;
-  const kwLower = kw.toLowerCase(); // 下面判断「书名自己是否命中」用，与 SQL 的 LIKE 保持一样的大小写不敏感
+  const km = keywordMatch(kw);
+  const kwLower = kw.toLowerCase(); // 下面判断「标题自己是否命中」用，与 SQL 的 LIKE 保持一样的大小写不敏感
   const where = base.slice();
   const params = baseParams.slice();
-  if (kw) {
-    where.push('(name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC +
-      ' OR tags LIKE ? ' + LIKE_ESC + ')');
-    params.push(like, like, tagLike);
+  if (km) {
+    where.push(km.whereSql);
+    params.push(...km.whereParams);
   }
   const whereSql = where.join(' AND ');
-  const [totalRows] = await pool.query(`SELECT COUNT(*) AS n FROM library_subjects WHERE ${whereSql}`, params);
+  const [totalRows] = await pool.query('SELECT COUNT(*) AS n FROM library_subjects WHERE ' + whereSql, params);
   const total = totalRows[0].n;
-  // 标题命中数（不含标签关联）：只在有关键词时多查一次，两千多条的全表扫描是毫秒级
+  // 命中构成（只在有关键词时多查两次，两千多条的全表扫描是毫秒级）：
+  //   titleMatches = 书名自己命中的条数；aliasMatches = 书名没命中、靠别名找回来的条数。
+  // 其余（total - titleMatches - aliasMatches）才是标签关联，前端据此解释「结果为什么变多了」。
   let titleMatches = total;
-  if (kw) {
+  let aliasMatches = 0;
+  if (km) {
     const [tm] = await pool.query(
-      `SELECT COUNT(*) AS n FROM library_subjects WHERE ${base.join(' AND ')}` +
-      ` AND (name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC})`,
-      [...baseParams, like, like]
+      'SELECT COUNT(*) AS n FROM library_subjects WHERE ' + base.join(' AND ') +
+      ' AND (name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ')',
+      [...baseParams, km.like, km.like]
     );
     titleMatches = tm[0].n;
+    const [am] = await pool.query(
+      'SELECT COUNT(*) AS n FROM library_subjects WHERE ' + base.join(' AND ') +
+      ' AND NOT (name LIKE ? ' + LIKE_ESC + ' OR name_cn LIKE ? ' + LIKE_ESC + ') AND ' + km.aliasWhereSql,
+      [...baseParams, km.like, km.like, ...km.aliasWhereParams]
+    );
+    aliasMatches = am[0].n;
   }
   const lastPage = Math.max(1, Math.ceil(total / lim));
   const safePage = Math.min(pg, lastPage);
@@ -812,21 +1024,12 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
   // 否则一条错日期会永远占着头名。池外按热度兜底 —— 9 千多条老书按首卷日期排会压成「老作品展」。
   const effDate = "COALESCE(NULLIF(latest_date, ''), air_date)";
   const isRecent = `(${effDate} >= date('now', '-365 day') AND ${effDate} <= date('now', '+180 day'))`;
-  // 命中等级：0 标题全等 > 1 标题前缀 > 2 标题包含 > 3 整标签 > 4 标签包含。
+  // 命中等级：0 标题全等 > 1 标题前缀 > 2 标题包含 > 3 别名全等 > 4 别名前缀 > 5 别名包含 > 6 整标签 > 7 标签包含。
   // 有关键词时它永远压在用户选的排序前面 —— 搜「恋爱」实测漫画分类下标题命中 9 部、剩下的 329 部是标签关联，
-  // 不把标题命中拎到前面的话，第一页会被「碰巧被打过恋爱标签」的作品淹没，书名真叫恋爱的反而翻不到。
+  // 不把命中等级拎到前面的话，第一页会被「碰巧被打过恋爱标签」的作品淹没，书名真叫恋爱的反而翻不到。
   // 排序里的 ? 在 SQL 文本中位于 WHERE 之后、LIMIT 之前，所以绑定顺序是 params -> orderParams -> lim/offset。
-  let relevanceKeys = '';
-  const orderParams = [];
-  if (kw) {
-    const kwPrefix = escapeLike(kw) + '%';
-    relevanceKeys =
-      'CASE WHEN name = ? COLLATE NOCASE OR name_cn = ? COLLATE NOCASE THEN 0' +
-      ` WHEN name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC} THEN 1` +
-      ` WHEN name LIKE ? ${LIKE_ESC} OR name_cn LIKE ? ${LIKE_ESC} THEN 2` +
-      ` WHEN tags LIKE ? ${LIKE_ESC} THEN 3 ELSE 4 END, `;
-    orderParams.push(kw, kw, kwPrefix, kwPrefix, like, like, tagWholeLike);
-  }
+  const relevanceKeys = km ? km.orderSql : '';
+  const orderParams = km ? km.orderParams : [];
   // 没有关键词时 relevanceKeys 是空串，浏览列表拼出来的 SQL 与加这个功能之前逐字节一致
   const orderKeys = sort === 'title' ? 'name_cn ASC, name ASC'
     : sort === 'rating' ? 'rating_score DESC, rating_total DESC'
@@ -841,16 +1044,19 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
      FROM library_subjects WHERE ${whereSql} ${order} LIMIT ? OFFSET ?`,
     [...params, ...orderParams, lim, offset]
   );
+  // 这一页里靠别名找回来的条目：反查命中的别名原文，前端才显示得出「又名 XXX」
+  const aliasHits = await aliasesOfRows(rows, category, km);
   const list = rows.map(r => {
     let tags = [], regions = [];
     try { tags = JSON.parse(r.tags || '[]'); } catch (e) {}
     try { regions = JSON.parse(r.regions || '[]'); } catch (e) {}
     const imgs = r.image ? { common: r.image, medium: r.image, large: r.image, grid: r.image, small: r.image } : undefined;
-    // 「这条为什么会出现」：只在书名本身没命中时才带出标签 —— 书名命中的条目本来就排在前面，
-    // 再给它挂一堆「碰巧也含这个词」的标签，只会让人看不懂排序依据（搜「恋爱」时几乎每条都有恋爱标签）。
+    // 「这条为什么会出现」：只在书名自己没命中时才带出「命中的别名 / 标签」——书名命中的条目本来就排在前面，
+    // 再给它挂一堆「碰巧也含这个词」的别名/标签，只会让人看不懂排序依据（搜「恋爱」时几乎每条都有恋爱标签）。
     const titleHit = kw !== '' &&
       (String(r.name || '').toLowerCase().includes(kwLower) || String(r.name_cn || '').toLowerCase().includes(kwLower));
-    const matchedTags = kw && !titleHit ? tags.filter(t => tagHitsKeyword(t, kw)).slice(0, 3) : [];
+    const matchedAliases = titleHit ? [] : (aliasHits.get(r.id) || []);
+    const matchedTags = kw && !titleHit && !matchedAliases.length ? tags.filter(t => tagHitsKeyword(t, kw)).slice(0, 3) : [];
     return {
       id: r.id,
       // 游戏分类按 Bangumi 类型 4 输出，详情页/卡片才能正确显示「游戏」
@@ -867,13 +1073,59 @@ async function queryLibrary({ category, page = 1, limit = 24, sort = 'rank', key
       platform: r.platform,
       tags,
       regions,
+      // 命中的别名原文（VNDB 原名/罗马字/英文别名）：空数组表示这条不是靠别名找回来的
+      matched_aliases: matchedAliases,
       // 命中的标签（关联搜索的解释依据）：空数组表示这条不是靠标签关联进来的
       matched_tags: matchedTags
     };
   });
-  return { data: list, total, titleMatches, page: safePage, limit: lim, totalPages: lastPage, source: 'local' };
+  return { data: list, total, titleMatches, aliasMatches, page: safePage, limit: lim, totalPages: lastPage, source: 'local' };
 }
+// 本地库分类白名单：suggest 是公开接口，category 由 URL 决定，
+// 绝不能拿它去索引对象（CATEGORY_SQL['constructor'] 会捞到原型链上的函数，等于把 SQL 片段交给调用方）
+const LIB_CATEGORIES = ['manga', 'lightnovel', 'galgame'];
 
+// 搜索联想（search-as-you-type）：只查本地库，零外部请求。
+// 与 queryLibrary 共用 keywordMatch，保证「下拉里出现的条目」和「搜出来的结果」是同一套命中规则；
+// 单字也要能出结果（书名 LIKE 照旧，别名/标签在单字时只做精确匹配，见 keywordMatch）。
+async function suggestLibrary({ category, keyword = '', limit = 8 } = {}) {
+  const cat = strParam(category).trim();
+  const kw = strParam(keyword).trim().slice(0, 60);
+  const lim = clampInt(limit, 8, 1, 20);
+  if (!LIB_CATEGORIES.includes(cat) || !kw) return { q: kw, category: cat, data: [] };
+  const km = keywordMatch(kw);
+  const [rows] = await pool.query(
+    'SELECT subject_id AS id, category, name, name_cn, image, air_date, rating_score, rating_total, rank, tags' +
+    ' FROM library_subjects WHERE ' + CATEGORY_SQL[cat] + ' AND blocked = 0 AND ' + km.whereSql +
+    ' ORDER BY ' + km.orderSql + ' rating_total DESC, rank ASC LIMIT ?',
+    [...km.whereParams, ...km.orderParams, lim]
+  );
+  const aliasHits = await aliasesOfRows(rows, cat, km);
+  const kwLower = kw.toLowerCase();
+  const data = (rows || []).map(r => {
+    let tags = [];
+    try { tags = JSON.parse(r.tags || '[]'); } catch (e) {}
+    const titleHit = String(r.name || '').toLowerCase().includes(kwLower) ||
+      String(r.name_cn || '').toLowerCase().includes(kwLower);
+    const aliases = titleHit ? [] : (aliasHits.get(r.id) || []);
+    const matchedTags = !titleHit && !aliases.length ? tags.filter(t => tagHitsKeyword(t, kw)).slice(0, 2) : [];
+    return {
+      id: r.id,
+      category: r.category,
+      type: r.category === 'galgame' ? 4 : 1,
+      name: r.name,
+      name_cn: r.name_cn || r.name,
+      image: r.image || '',
+      air_date: r.air_date || '',
+      rating: r.rating_total ? { score: r.rating_score, total: r.rating_total } : undefined,
+      // 这条为什么会出现在下拉里：书名 / 别名 / 标签（前端各标一个角标，用户才看得懂）
+      via: titleHit ? 'title' : (aliases.length ? 'alias' : 'tag'),
+      alias: aliases[0] || '',
+      matched_tags: matchedTags
+    };
+  });
+  return { q: kw, category: cat, data };
+}
 // 启动定时：进程启动后延时 5s 同步一次（不阻塞启动），之后每 12 小时一次
 let timer = null;
 function startScheduler() {
@@ -892,4 +1144,4 @@ async function getStatus() {
   };
 }
 
-module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus, runVndbSync, refreshGalgameLatest, vndbStatus, kickVndbEnrich, mergeExt };
+module.exports = { runSync, ensureSync, startScheduler, syncStatus, queryLibrary, classify, classifyGame, importCuratedGames, regionsOf, getStatus, runVndbSync, refreshGalgameLatest, vndbStatus, kickVndbEnrich, mergeExt, suggestLibrary, rebuildAliases, writeAliasesForSubject };

@@ -402,6 +402,27 @@ CREATE INDEX IF NOT EXISTS idx_sync_req_status ON collection_sync_requests(statu
       ensureColumn('library_subjects', 'latest_date', "latest_date TEXT DEFAULT ''");
     }
   },
+  {
+    id: 12,
+    name: 'library-alias-index-v12',
+    // 别名索引（search-as-you-type 与「别名/译名/罗马音」检索用）：
+    // norm = 归一化（NFKC + 小写 + 空格折叠），compact = 去掉空格与连接符的紧凑形式，
+    // 两者都由 library.js 在本地从 ext.vndb 生成，不打任何外部 API。
+    sql: `
+CREATE TABLE IF NOT EXISTS library_aliases (
+  subject_id INTEGER NOT NULL,
+  category TEXT NOT NULL,
+  alias TEXT NOT NULL,
+  alias_type TEXT NOT NULL DEFAULT 'vndb',
+  norm TEXT NOT NULL DEFAULT '',
+  compact TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (subject_id, category, alias, alias_type)
+);
+CREATE INDEX IF NOT EXISTS idx_lib_alias_norm ON library_aliases(norm);
+CREATE INDEX IF NOT EXISTS idx_lib_alias_compact ON library_aliases(compact);
+CREATE INDEX IF NOT EXISTS idx_lib_alias_subject ON library_aliases(category, subject_id);
+`
+  },
 ];
 
 function runMigrations() {
