@@ -3,18 +3,9 @@
 const express = require('express');
 const { pool } = require('../db');
 const { requireOwner } = require('../auth');
+const { toIsoUtc } = require('../query');
 
 const router = express.Router();
-
-// SQLite 的 CURRENT_TIMESTAMP 存的是 UTC 文本（YYYY-MM-DD HH:MM:SS）。
-// 直接丢给浏览器 new Date() 会被当成本地时间解析，导致比真实时间早 8 小时，
-// 这里统一补成带 Z 的 ISO 字符串，让前端按本地时区正确显示。
-function toIsoUtc(s) {
-  if (!s) return null;
-  const t = String(s);
-  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t)) return t.replace(' ', 'T') + 'Z';
-  return t;
-}
 
 // 邮箱脱敏：lvger@qq.com -> lv***@qq.com（前端可切换显示完整邮箱）
 function maskEmail(e) {

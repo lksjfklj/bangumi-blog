@@ -66,4 +66,39 @@ function cleanName(v, max = 40) {
     .slice(0, max);
 }
 
-module.exports = { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE, parseId, cleanName };
+// SQLite 的 CURRENT_TIMESTAMP 存的是 UTC 文本（YYYY-MM-DD HH:MM:SS）。
+// 直接丢给浏览器 new Date() 会被当成本地时间解析（东八区早 8 小时，跨零点还会差一天），
+// 统一补成带 Z 的 ISO 再返回给前端。
+function toIsoUtc(s) {
+  if (!s) return null;
+  const t = String(s);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t)) return t.replace(' ', 'T') + 'Z';
+  return t;
+}
+
+// 请求体里的发布标志只认 0/1。客户端可能把草稿送来字符串 "0"（表单/curl/老前端），
+// 那种形态在 `published ? 1 : 0` 里是真值，会把草稿直接发出去。
+function toPublished(v, def = 1) {
+  if (v === undefined || v === null || v === '') return def;
+  return +v === 1 ? 1 : 0;
+}
+
+// slug 会直接拼进 /blog/<slug>、RSS 的 <link> 和 sitemap：空白折成 -，去掉首尾 - 与控制字符。
+// 中文保留（前端统一 encodeURIComponent 后再拼 URL），不做音译。
+function normSlug(v, max = 200) {
+  return strParam(v, '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, max);
+}
+
+// 返回空串表示合法。/ \ ? # % 会把 /blog/<slug> 截断或破坏 RSS/sitemap 的 XML，
+// 宁可在这里报 400 也不要存进库里生成一个打不开的链接。
+function slugError(s) {
+  if (!s) return 'slug 不能为空';
+  if (/[\/\\?#%]/.test(s)) return 'slug 不能包含 / \\ ? # % 这些字符';
+  return '';
+}
+
+module.exports = { strParam, clampInt, paging, escapeLike, LIKE_ESC, MAX_PAGE, parseId, cleanName, toIsoUtc, toPublished, normSlug, slugError };

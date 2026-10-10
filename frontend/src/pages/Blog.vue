@@ -1,7 +1,7 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { NInput, NTag, NPagination, NSpin, NEmpty, NButton, NModal, NSelect, NPopconfirm, NInputNumber, useMessage } from 'naive-ui';
+import { NInput, NTag, NPagination, NSpin, NEmpty, NButton, NModal, NPopconfirm, NInputNumber, useMessage } from 'naive-ui';
 import { api, fmtDate } from '../api';
 import { useUserStore } from '../stores/user';
 
@@ -16,6 +16,8 @@ const page = ref(1);
 const size = 10;
 const q = ref('');
 const activeTag = ref('');
+// 站长视角默认看全部（含草稿）：存完草稿回到列表就能直接看到，不用再去站务管理翻
+const status = ref('all');
 const loading = ref(true);
 
 // ---------- 写作权限：仅站长本人（访客/普通用户只读） ----------
@@ -27,29 +29,81 @@ const saving = ref(false);
 const form = ref({ id: 0, slug: '', title: '', summary: '', content: '', tags: [], published: 1 });
 const tagText = ref('');
 
+// ---------- 防丢稿：写的过程中内容一直存在本机，误关弹窗 / 刷新 / 断网都能捞回来 ----------
+const DRAFT_KEY = 'blog-editor-draft';
+const dirty = ref(false);
+const pending = ref(null); // 打开编辑器时发现的本机未保存稿
+const sig = computed(() => JSON.stringify([form.value.title, form.value.slug, form.value.summary, form.value.content, form.value.tags, tagText.value]));
+let baseline = '';
+let draftTimer = 0;
+let restored = false; // 用户已选择恢复本机稿，后到的接口正文不许再覆盖它
+
+function readDraft() {
+  try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch (e) { return null; }
+}
+function markBaseline() { baseline = sig.value; dirty.value = false; }
+function onBeforeUnload(e) { if (editing.value && dirty.value) { e.preventDefault(); e.returnValue = ''; } }
+
+watch(sig, () => {
+  if (!editing.value) return;
+  dirty.value = sig.value !== baseline;
+  if (!dirty.value) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...form.value, tagText: tagText.value, savedAt: Date.now() })); } catch (e) { /* 隐私模式/配额满，忽略 */ }
+  }, 800);
+});
+
 function openNew() {
   form.value = { id: 0, slug: '', title: '', summary: '', content: '', tags: [], published: 1 };
   tagText.value = '';
+  restored = false;
   editing.value = true;
+  const d = readDraft();
+  pending.value = d && !d.id ? d : null;
+  markBaseline();
 }
 function openEdit(p) {
   form.value = { id: p.id, slug: p.slug, title: p.title, summary: p.summary || '', content: '', tags: [], published: p.published };
   tagText.value = '';
+  restored = false;
   editing.value = true;
+  const d = readDraft();
+  pending.value = d && d.id === p.id ? d : null;
+  markBaseline();
   api.get('/blog/posts/' + p.slug).then(d => {
+    if (restored || form.value.id !== p.id) return;
     form.value.content = d.content || '';
     form.value.tags = d.tags || [];
     tagText.value = d.tags.join(', ');
+    markBaseline();
   }).catch(() => {});
 }
-async function save() {
+function restorePending() {
+  const d = pending.value;
+  if (!d) return;
+  form.value = { id: d.id, slug: d.slug, title: d.title, summary: d.summary || '', content: d.content || '', tags: d.tags || [], published: d.published };
+  tagText.value = d.tagText || (d.tags || []).join(', ');
+  restored = true;
+  pending.value = null;
+  markBaseline();
+  dirty.value = true; // 恢复出来的内容还没进服务器，关页面前提醒一下
+  message.info('已恢复本机草稿，记得点保存');
+}
+function onKey(e) {
+  if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 's') { e.preventDefault(); save(form.value.published); }
+}
+async function save(publish) {
   if (!form.value.title.trim() || !form.value.slug.trim()) { message.warning('标题和 slug 必填'); return; }
   form.value.tags = tagText.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  form.value.published = publish;
   saving.value = true;
   try {
     if (form.value.id) await api.put('/blog/admin/posts/' + form.value.id, form.value);
     else await api.post('/blog/admin/posts', form.value);
-    message.success('已保存');
+    message.success(publish ? '已发布' : '草稿已保存（博客列表里能看到了）');
+    try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* 忽略 */ }
+    dirty.value = false;
     editing.value = false;
     await Promise.all([load(), loadTags()]);
   } catch (e) { message.error(e.message); }
@@ -166,6 +220,8 @@ async function load() {
     const params = new URLSearchParams({ page: page.value, size });
     if (q.value.trim()) params.set('q', q.value.trim());
     if (activeTag.value) params.set('tag', activeTag.value);
+    // status 只在站长会话下带；访客就算手动加 ?status=all，后端也只回已发布
+    if (canWrite.value) params.set('status', status.value);
     const d = await api.get('/blog/posts?' + params.toString());
     posts.value = d.data || [];
     total.value = d.total || 0;
@@ -177,12 +233,15 @@ async function load() {
   loading.value = false;
 }
 function pickTag(t) { activeTag.value = t === activeTag.value ? '' : t; page.value = 1; load(); }
+function pickStatus(s) { status.value = s; page.value = 1; load(); }
 onMounted(async () => {
+  window.addEventListener('beforeunload', onBeforeUnload);
   loadTags();
   load();
   loadNews();
   loadSources();
 });
+onUnmounted(() => window.removeEventListener('beforeunload', onBeforeUnload));
 </script>
 
 <template>
@@ -205,6 +264,11 @@ onMounted(async () => {
 
     <template v-if="tab === 'posts'">
     <div class="tool-row">
+      <div v-if="canWrite" class="news-filters">
+        <button class="chip" :class="{ on: status === 'all' }" @click="pickStatus('all')">全部</button>
+        <button class="chip" :class="{ on: status === 'published' }" @click="pickStatus('published')">已发布</button>
+        <button class="chip" :class="{ on: status === 'draft' }" @click="pickStatus('draft')">草稿</button>
+      </div>
       <div v-if="tags.length" class="tag-bar">
         <n-tag :type="activeTag === '' ? 'primary' : 'default'" :bordered="false" checkable :checked="activeTag === ''" @click="pickTag('')">全部</n-tag>
         <n-tag v-for="t in tags" :key="t.name" :bordered="false" :type="activeTag === t.name ? 'primary' : 'default'"
@@ -220,6 +284,7 @@ onMounted(async () => {
         </router-link>
         <div class="meta">
           <span>{{ fmtDate(p.created_at) }}</span>
+          <n-tag v-if="!p.published" size="small" :bordered="false" type="warning">草稿</n-tag>
           <n-tag v-for="t in p.tags" :key="t" size="small" :bordered="false" type="info">{{ t }}</n-tag>
           <span class="spacer"></span>
           <template v-if="canWrite">
@@ -278,15 +343,16 @@ onMounted(async () => {
 
     <!-- 管理令牌 -->
     <!-- 写文章 / 编辑 -->
-    <n-modal v-model:show="editing" preset="card" :title="form.id ? '✏️ 编辑文章' : '✍️ 写文章'" style="width:840px;max-width:96vw">
+    <n-modal v-model:show="editing" preset="card" :mask-closable="false" :title="form.id ? '✏️ 编辑文章' : '✍️ 写文章'" style="width:840px;max-width:96vw">
       <div class="edit-form">
-        <div class="row"><label>标题 *</label><n-input v-model:value="form.title" placeholder="文章标题" /></div>
-        <div class="row row2">
-          <div><label>Slug *</label><n-input v-model:value="form.slug" placeholder="url 标识，如 my-post" /></div>
-          <div><label>状态</label>
-            <n-select v-model:value="form.published" :options="[{ label: '发布', value: 1 }, { label: '草稿', value: 0 }]" />
-          </div>
+        <div v-if="pending" class="restore-bar">
+          <span>发现 {{ new Date(pending.savedAt).toLocaleString('zh-CN') }} 留在本机、还没保存的稿子</span>
+          <span class="spacer"></span>
+          <n-button size="tiny" type="primary" @click="restorePending">恢复</n-button>
+          <n-button size="tiny" quaternary @click="pending = null">忽略</n-button>
         </div>
+        <div class="row"><label>标题 *</label><n-input v-model:value="form.title" placeholder="文章标题" /></div>
+        <div class="row"><label>Slug *</label><n-input v-model:value="form.slug" placeholder="url 标识，如 my-post（发布后就是 /blog/这个值）" /></div>
         <div class="row"><label>摘要</label><n-input v-model:value="form.summary" placeholder="列表页显示的一句话摘要" /></div>
         <div class="row"><label>标签（逗号分隔，如：技术, 随笔）</label><n-input v-model:value="tagText" placeholder="技术, 二次元, 随笔" /></div>
         <div class="row">
@@ -297,10 +363,14 @@ onMounted(async () => {
               <span class="muted editor-hint">上传后会自动插入到光标位置</span>
             </div>
           </div>
-          <n-input ref="contentRef" v-model:value="form.content" type="textarea" :rows="16" placeholder="# 标题&#10;&#10;正文…" />
+          <n-input ref="contentRef" v-model:value="form.content" type="textarea" :rows="16" placeholder="# 标题&#10;&#10;正文…" @keydown="onKey" />
           <input ref="fileInput" type="file" accept="image/*" style="display:none" @change="onFile" />
         </div>
-        <n-button type="primary" block :loading="saving" @click="save">保存</n-button>
+        <div class="save-row">
+          <n-button block secondary :loading="saving" @click="save(0)">存草稿</n-button>
+          <n-button block type="primary" :loading="saving" @click="save(1)">发布</n-button>
+        </div>
+        <p class="muted editor-hint">Ctrl/⌘+S 也能存；正文每 1 秒自动暂存在本机浏览器，误关弹窗或刷新都不会丢。</p>
       </div>
     </n-modal>
   </div>
@@ -320,16 +390,13 @@ onMounted(async () => {
 .post-link h3 { margin: 0 0 8px; font-size: 18px; color: var(--text); }
 .post-card:hover .post-link h3 { color: var(--accent); }
 .edit-form .row { margin-bottom: 12px; }
-.edit-form .row2 { display: grid; grid-template-columns: 1fr 160px; gap: 12px; }
+.save-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+.restore-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; padding: 8px 12px; border-radius: 10px; font-size: 13px; background: var(--tag-gold-bg); border: 1px solid var(--tag-gold-border); color: var(--tag-gold-text); }
 .edit-form label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 5px; }
 .editor-bar { display: flex; align-items: center; justify-content: space-between; }
 .editor-tools { display: flex; align-items: center; gap: 8px; }
 .editor-hint { font-size: 12px; }
 .token-box { padding: 4px 0; }
-@media (max-width: 720px) {
-  .edit-form .row2 { grid-template-columns: 1fr; }
-}
-
 .blog-tabs { display: flex; gap: 10px; margin: 4px 0 18px; }
 .btab { border: 1px solid var(--border); background: var(--bg-card); color: var(--text-dim); border-radius: 999px; padding: 7px 20px; font-size: 14px; cursor: pointer; transition: all .2s; font-family: inherit; }
 .btab:hover { border-color: var(--accent); color: var(--accent); }

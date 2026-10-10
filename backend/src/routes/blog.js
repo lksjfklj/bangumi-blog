@@ -4,35 +4,54 @@ const md = require('markdown-it')({ html: true, linkify: true, breaks: false });
 const { sanitizeHtmlSafe } = require('../sanitize');
 const { pool } = require('../db');
 const { requireAdmin, isOwnerUser } = require('../auth');
-const { strParam, paging, escapeLike, LIKE_ESC } = require('../query');
+const { strParam, paging, escapeLike, LIKE_ESC, parseId, toIsoUtc, toPublished, normSlug, slugError } = require('../query');
 const router = express.Router();
 
-// 文章列表（公开：仅已发布）
+// 列表过滤条件只在这里拼一次，列表查询和总数查询共用同一份。
+// 旧写法两边各拼一套，加了个关键词搜索后就漏了 q：列表只剩 1 条、total 还是全部已发布数，
+// 「共 N 篇」对不上、分页还能翻出空白页。
+// status 只在站长本人请求时生效：'all' 全部 / 'draft' 只看草稿 / 其余（含任何非站长）都只出已发布。
+function listWhere({ owner, status, tag, q }) {
+  const where = [];
+  const args = [];
+  if (owner && status === 'all') { /* 站长看全部（含草稿） */ }
+  else if (owner && status === 'draft') where.push('p.published = 0');
+  else where.push('p.published = 1');
+  if (tag) {
+    where.push('p.id IN (SELECT post_id FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE t.name = ?)');
+    args.push(tag);
+  }
+  if (q) {
+    // 转义 LIKE 通配符，避免用户输入的 % / _ 被当成模式
+    where.push('(p.title LIKE ? ' + LIKE_ESC + ' OR p.summary LIKE ? ' + LIKE_ESC + ' OR p.content LIKE ? ' + LIKE_ESC + ')');
+    const like = '%' + escapeLike(q) + '%';
+    args.push(like, like, like);
+  }
+  return { whereSql: where.length ? ' WHERE ' + where.join(' AND ') : '', args };
+}
+
+// 文章列表（公开：只有已发布；站长本人可带 ?status=all|draft 看到自己的草稿）
 router.get('/posts', async (req, res, next) => {
   try {
     // 参数全部经 query.js 归一化：size/page 可能是数组或 NaN，tag 可能是 ?tag[]=a 数组
     const tag = strParam(req.query.tag).trim();
     const q = strParam(req.query.q).trim();
+    const status = strParam(req.query.status).trim();
     const { page, limit, offset } = paging(req.query, { defSize: 10, maxSize: 50 });
-    let sql = `SELECT p.id, p.slug, p.title, p.summary, p.published, p.created_at, p.updated_at,
-               (SELECT GROUP_CONCAT(t.name) FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id) AS tags
-               FROM posts p WHERE p.published = 1`;
-    const args = [];
-    if (tag) { sql += ' AND p.id IN (SELECT post_id FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE t.name = ?)'; args.push(tag); }
-    if (q) {
-      // 转义 LIKE 通配符，避免用户输入的 % / _ 被当成模式
-      sql += ' AND (p.title LIKE ? ' + LIKE_ESC + ' OR p.summary LIKE ? ' + LIKE_ESC + ' OR p.content LIKE ? ' + LIKE_ESC + ')';
-      const like = '%' + escapeLike(q) + '%';
-      args.push(like, like, like);
-    }
-    sql += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
-    args.push(limit, offset);
-    const [rows] = await pool.query(sql, args);
-    const [cnt] = await pool.query(
-      'SELECT COUNT(*) AS total FROM posts p WHERE p.published = 1' + (tag ? ' AND p.id IN (SELECT post_id FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE t.name = ?)' : ''),
-      tag ? [tag] : []
+    const { whereSql, args } = listWhere({ owner: isOwnerUser(req.user), status, tag, q });
+    const [rows] = await pool.query(
+      `SELECT p.id, p.slug, p.title, p.summary, p.published, p.created_at, p.updated_at,
+          (SELECT GROUP_CONCAT(t.name) FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id) AS tags
+       FROM posts p` + whereSql + ' ORDER BY p.created_at DESC, p.id DESC LIMIT ? OFFSET ?',
+      args.concat([limit, offset])
     );
-    const list = rows.map(r => ({ ...r, tags: r.tags ? r.tags.split(',') : [] }));
+    const [cnt] = await pool.query('SELECT COUNT(*) AS total FROM posts p' + whereSql, args);
+    const list = rows.map(r => ({
+      ...r,
+      tags: r.tags ? r.tags.split(',') : [],
+      created_at: toIsoUtc(r.created_at),
+      updated_at: toIsoUtc(r.updated_at)
+    }));
     res.json({ data: list, total: cnt[0].total, page, size: limit });
   } catch (e) { next(e); }
 });
@@ -55,6 +74,8 @@ router.get('/posts/:slug', async (req, res, next) => {
     }
     post.html = sanitizeHtmlSafe(md.render(post.content || ''));
     post.tags = post.tags ? post.tags.split(',') : [];
+    post.created_at = toIsoUtc(post.created_at);
+    post.updated_at = toIsoUtc(post.updated_at);
     res.json(post);
   } catch (e) { next(e); }
 });
@@ -90,20 +111,23 @@ async function upsertTags(conn, postId, tags) {
 
 router.get('/admin/posts', async (req, res, next) => {
   try {
-    const [rows] = await pool.query('SELECT id, slug, title, published, created_at, updated_at FROM posts ORDER BY created_at DESC');
-    res.json(rows);
+    const [rows] = await pool.query('SELECT id, slug, title, published, created_at, updated_at FROM posts ORDER BY created_at DESC, id DESC');
+    res.json(rows.map(r => ({ ...r, created_at: toIsoUtc(r.created_at), updated_at: toIsoUtc(r.updated_at) })));
   } catch (e) { next(e); }
 });
 
 router.post('/admin/posts', async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
-    const { slug, title, summary, content, tags, published = 1 } = req.body || {};
-    if (!title || !slug) return res.status(400).json({ error: '缺少 title/slug' });
+    const { title, summary, content, tags, published = 1 } = req.body || {};
+    const slug = normSlug(req.body && req.body.slug);
+    if (!title) return res.status(400).json({ error: '缺少 title/slug' });
+    const badSlug = slugError(slug);
+    if (badSlug) return res.status(400).json({ error: badSlug });
     await conn.beginTransaction();
     const [ins] = await conn.query(
       'INSERT INTO posts (slug, title, summary, content, published) VALUES (?, ?, ?, ?, ?)',
-      [String(slug).trim(), String(title).trim(), summary || '', content || '', published ? 1 : 0]
+      [slug, String(title).trim(), summary || '', content || '', toPublished(published)]
     );
     await upsertTags(conn, ins.insertId, tags);
     await conn.commit();
@@ -120,13 +144,20 @@ router.post('/admin/posts', async (req, res, next) => {
 router.put('/admin/posts/:id', async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
-    const { slug, title, summary, content, tags, published } = req.body || {};
-    const id = +req.params.id;
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'id 无效' });
+    const { title, summary, content, tags, published } = req.body || {};
+    const slug = normSlug(req.body && req.body.slug);
+    if (!title) return res.status(400).json({ error: '缺少 title/slug' });
+    const badSlug = slugError(slug);
+    if (badSlug) return res.status(400).json({ error: badSlug });
     await conn.beginTransaction();
-    await conn.query(
-      'UPDATE posts SET slug = ?, title = ?, summary = ?, content = ?, published = ? WHERE id = ?',
-      [slug || '', title || '', summary || '', content || '', published ? 1 : 0, id]
+    const [r] = await conn.query(
+      'UPDATE posts SET slug = ?, title = ?, summary = ?, content = ?, published = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [slug, String(title).trim(), summary || '', content || '', toPublished(published), id]
     );
+    // 文章在另一个标签页被删掉时，旧编辑页再点保存不该回一个"已保存"却什么都没写进去
+    if (!r.affectedRows) { await conn.rollback(); return res.status(404).json({ error: '文章不存在或已被删除' }); }
     if (Array.isArray(tags)) await upsertTags(conn, id, tags);
     await conn.commit();
     res.json({ ok: true });
@@ -142,9 +173,12 @@ router.put('/admin/posts/:id', async (req, res, next) => {
 router.delete('/admin/posts/:id', async (req, res, next) => {
   const conn = await pool.getConnection();
   try {
+    const id = parseId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'id 无效' });
     await conn.beginTransaction();
-    await conn.query('DELETE FROM post_tags WHERE post_id = ?', [+req.params.id]);
-    await conn.query('DELETE FROM posts WHERE id = ?', [+req.params.id]);
+    await conn.query('DELETE FROM post_tags WHERE post_id = ?', [id]);
+    const [r] = await conn.query('DELETE FROM posts WHERE id = ?', [id]);
+    if (!r.affectedRows) { await conn.rollback(); return res.status(404).json({ error: '文章不存在或已被删除' }); }
     await conn.commit();
     res.json({ ok: true });
   } catch (e) {
@@ -156,3 +190,4 @@ router.delete('/admin/posts/:id', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.listWhere = listWhere;

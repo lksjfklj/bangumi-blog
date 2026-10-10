@@ -9,6 +9,7 @@ const { initDb } = require('./db');
 const { getUserBySession, cleanupExpiredSessions } = require('./auth');
 const { securityHeaders, originGuard, rateLimit } = require('./security');
 const logger = require('./logger');
+const { toIsoUtc } = require('./query');
 
 const app = express();
 app.disable('x-powered-by'); // 不暴露框架版本指纹
@@ -92,11 +93,12 @@ app.get('/blog/feed.xml', async (req, res, next) => {
       'SELECT slug, title, summary, content, created_at FROM posts WHERE published = 1 ORDER BY created_at DESC LIMIT 20'
     );
     const items = rows.map(p => {
-      const link = config.publicBase + '/blog/' + p.slug;
+      // slug 可能是中文/含空格，XML 里必须是编码后的形态
+      const link = config.publicBase + '/blog/' + encodeURIComponent(p.slug);
       const desc = (p.summary || p.content || '').slice(0, 200);
       return '<item><title>' + xmlEsc(p.title) + '</title><link>' + xmlEsc(link) + '</link>' +
         '<guid isPermaLink="true">' + xmlEsc(link) + '</guid><description>' + xmlEsc(desc) + '</description>' +
-        '<pubDate>' + new Date(p.created_at).toUTCString() + '</pubDate></item>';
+        '<pubDate>' + new Date(toIsoUtc(p.created_at)).toUTCString() + '</pubDate></item>';
     }).join('\n');
     const xml = '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0">\n<channel>\n' +
       '<title>秘封俱乐部 · 博客</title>\n<link>' + xmlEsc(config.publicBase) + '</link>\n' +
@@ -114,8 +116,8 @@ app.get('/sitemap.xml', async (req, res, next) => {
     const locs = ['/', '/anime', '/watch', '/collection', '/blog', '/about', '/stats']
       .map(p => '<url><loc>' + xmlEsc(config.publicBase + p) + '</loc><lastmod>' + today + '</lastmod></url>');
     for (const r of rows) {
-      const mod = r.updated_at ? new Date(r.updated_at).toISOString().slice(0, 10) : today;
-      locs.push('<url><loc>' + xmlEsc(config.publicBase + '/blog/' + r.slug) + '</loc><lastmod>' + mod + '</lastmod></url>');
+      const mod = r.updated_at ? new Date(toIsoUtc(r.updated_at)).toISOString().slice(0, 10) : today;
+      locs.push('<url><loc>' + xmlEsc(config.publicBase + '/blog/' + encodeURIComponent(r.slug)) + '</loc><lastmod>' + mod + '</lastmod></url>');
     }
     const xml = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
       locs.join('\n') + '\n</urlset>';

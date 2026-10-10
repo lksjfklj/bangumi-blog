@@ -52,6 +52,7 @@ const posts = ref([]);
 const editing = ref(false);
 const form = ref({ id: 0, slug: '', title: '', summary: '', content: '', tags: [], published: 1 });
 const tagText = ref('');
+const postSaving = ref(false);
 
 async function load() {
   try {
@@ -78,8 +79,10 @@ function openEdit(p) {
   }).catch(() => {});
 }
 async function save() {
+  if (postSaving.value) return; // 双击会建出两篇一模一样的文章
   if (!form.value.title.trim() || !form.value.slug.trim()) { message.warning('标题和 slug 必填'); return; }
   form.value.tags = tagText.value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  postSaving.value = true;
   try {
     if (form.value.id) await api.put('/blog/admin/posts/' + form.value.id, form.value);
     else await api.post('/blog/admin/posts', form.value);
@@ -87,6 +90,7 @@ async function save() {
     editing.value = false;
     load();
   } catch (e) { message.error(e.message); }
+  postSaving.value = false;
 }
 async function remove(id) {
   try {
@@ -324,7 +328,7 @@ onMounted(() => { if (userStore.isOwner) { loadUsers(); load(); loadAnns(); load
         <div class="row"><label>标签</label><n-input v-model:value="tagText" placeholder="逗号分隔，如：技术, 随笔" /></div>
         <div class="row"><label>正文 (Markdown)</label><n-input v-model:value="form.content" type="textarea" :rows="16" placeholder="# 标题&#10;&#10;正文…" /></div>
         <div class="row"><label>发布（1=发布，0=草稿）</label><n-input-number v-model:value="form.published" :min="0" :max="1" style="width:100%" /></div>
-        <n-button type="primary" block @click="save">保存</n-button>
+        <n-button type="primary" block :loading="postSaving" @click="save">保存</n-button>
       </div>
     </n-modal>
 
